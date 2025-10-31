@@ -1,0 +1,89 @@
+name: Deploy React App to EC2
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Copy project to EC2
+        uses: appleboy/scp-action@v0.1.4
+        with:
+          host: ec2-13-59-53-131.us-east-2.compute.amazonaws.com
+          username: ec2-user
+          key: |
+            -----BEGIN RSA PRIVATE KEY-----
+            MIIEowIBAAKCAQEA7acwWWbUImLwNNfTw/RkcWtTgwXDvUYGLqyOQmTEsU7/5c0a
+            WFvCsG2Z++VFtcXjGIHcPHBTibuPXIcEl1kz6JV5It0HurdNH6bzFqVLqDfpvOCc
+            U8+Sjqk/i+/WuFMdWF7A8R8hjikIswSJTP/3kXM+xNjfzD7rGWIIyEO1XBCO8Tn+
+            SXPpTVbiEg4/1JpN7f7T3G9/Owe+VEF83nBnhOfTQy5MUANyRtbS3IhwL6s72+S0
+            neDDd1mxkAOK5VS5+IX7Dk5YqHc6lk/6A5QOgBpz8jZ3xX33eVydKFHugkzuy8XG
+            mx5sm62GLHodlFbi1iQy9B641VxFiU13wQgkiQIDAQABAoIBAFr6ky7Wh8V2PODt
+            8vrkV4N4A+t3zHxsDzfVBUzziL0cMijGQRysXDbwbm+ZUPuKeyrJpAdbNQ/YRsS0
+            R5StKIsUleA735aiT5sbbZoww2rtpMSS9CW9pCyLLHGk6n18DBLli1WDhnQGz3bA
+            +NMKdrsu9Eulft+RAq2f8x6/lPFeBImeAT7mrB6ww/QmqRt0I4ROdJaSzWWTSwgW
+            M2eByGfQUJrTd4UTcxnHaxDKebq/c50VMzA8pBrSiNP5hvt/lPaFpBgy4DhKZjf8
+            hS3/IrSTAUu51HtR68ebge6tOc7dqACkDU3x/Lu8vU15w557v+F0JKvJ0CM460jA
+            1hwdZBUCgYEA+tDuBIrnJubXnunsBpvfJjqRSRpNeL74L3p00CWA6PTNAVd1rgRJ
+            UGsAl1VegCTxoq7oakz1AAuYysEQE+vdNMTxQHI0XS3Orq/YB0jkKSyTHCyDFrvz
+            xaS8DbonE/H6Tpv5+0foHp26nIfxLRt8e7qIJ/NcoayKhOXg0PqBnJcCgYEA8pCd
+            ARzC3oc4soVBoLdgZ2XcHs2bqeSCPbpJxuXXCX10jpsPdVKQWK5Fqx+Z6FDAP1jq
+            CxmRWFlZirxGUatpyA4OT0TMlUw+6bBCU37hULPYGJgHG7jgK3fiD/bS15VWlgqN
+            Vo3hWiW6ah1wBWB7pdFLwlp+mqdimUQHbrJTy98CgYAFaF3JYUlMkGuTtI1vMwsj
+            ot2hCt0ivlNRir1cA4L9AtIstjsGTndaMYRovuFzt9gx3r2KFTCvGJDpxjHXjB1P
+            1vMwpYW1gJhVMdthhNPOg3SEhf0pj1HZMA0R6rKO/oecDEbegRVjG5l7aH7trwsH
+            C+WFnvyfS74M0XwAZXZH7wKBgQCflY8GBVMbrmEZ6lvkDeFKBZTNWz5XhvQ9Aku5
+            pMtV/gjqLY/9AyXegkFptS+/zSi+RJQuW1LpildD1Fx7LMg6iyzU8BGdA/28J29r
+            mWVJgBjjDVpX3cj2MDg1gpDyrti5fBXC5TNm6L19RQLHNtQCovEx2/HBc/CFn2E4
+            bfB9hwKBgE0FVVmUBzDY/Zg4PBxR6rCGtEBdDv2skg6o6oVUkV+p2mvWI9+kXBZd
+            m0biCLgS0M8jExlBdpBdbWDArDMbQNTsCuHYa58V2EeZfQEjs5HNFtigv2MFsj40
+            vaC364bUbSqv4h3MO3W+EfwcCkoHk6EioL/OXIiAYm8wik3EqztG
+            -----END RSA PRIVATE KEY-----
+          source: "./"
+          target: "/var/www/ap-backend/"
+
+      - name: Install & restart backend with PM2
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ec2-13-59-53-131.us-east-2.compute.amazonaws.com
+          username: ec2-user
+          key: |
+            -----BEGIN RSA PRIVATE KEY-----
+            MIIEowIBAAKCAQEA7acwWWbUImLwNNfTw/RkcWtTgwXDvUYGLqyOQmTEsU7/5c0a
+            WFvCsG2Z++VFtcXjGIHcPHBTibuPXIcEl1kz6JV5It0HurdNH6bzFqVLqDfpvOCc
+            U8+Sjqk/i+/WuFMdWF7A8R8hjikIswSJTP/3kXM+xNjfzD7rGWIIyEO1XBCO8Tn+
+            SXPpTVbiEg4/1JpN7f7T3G9/Owe+VEF83nBnhOfTQy5MUANyRtbS3IhwL6s72+S0
+            neDDd1mxkAOK5VS5+IX7Dk5YqHc6lk/6A5QOgBpz8jZ3xX33eVydKFHugkzuy8XG
+            mx5sm62GLHodlFbi1iQy9B641VxFiU13wQgkiQIDAQABAoIBAFr6ky7Wh8V2PODt
+            8vrkV4N4A+t3zHxsDzfVBUzziL0cMijGQRysXDbwbm+ZUPuKeyrJpAdbNQ/YRsS0
+            R5StKIsUleA735aiT5sbbZoww2rtpMSS9CW9pCyLLHGk6n18DBLli1WDhnQGz3bA
+            +NMKdrsu9Eulft+RAq2f8x6/lPFeBImeAT7mrB6ww/QmqRt0I4ROdJaSzWWTSwgW
+            M2eByGfQUJrTd4UTcxnHaxDKebq/c50VMzA8pBrSiNP5hvt/lPaFpBgy4DhKZjf8
+            hS3/IrSTAUu51HtR68ebge6tOc7dqACkDU3x/Lu8vU15w557v+F0JKvJ0CM460jA
+            1hwdZBUCgYEA+tDuBIrnJubXnunsBpvfJjqRSRpNeL74L3p00CWA6PTNAVd1rgRJ
+            UGsAl1VegCTxoq7oakz1AAuYysEQE+vdNMTxQHI0XS3Orq/YB0jkKSyTHCyDFrvz
+            xaS8DbonE/H6Tpv5+0foHp26nIfxLRt8e7qIJ/NcoayKhOXg0PqBnJcCgYEA8pCd
+            ARzC3oc4soVBoLdgZ2XcHs2bqeSCPbpJxuXXCX10jpsPdVKQWK5Fqx+Z6FDAP1jq
+            CxmRWFlZirxGUatpyA4OT0TMlUw+6bBCU37hULPYGJgHG7jgK3fiD/bS15VWlgqN
+            Vo3hWiW6ah1wBWB7pdFLwlp+mqdimUQHbrJTy98CgYAFaF3JYUlMkGuTtI1vMwsj
+            ot2hCt0ivlNRir1cA4L9AtIstjsGTndaMYRovuFzt9gx3r2KFTCvGJDpxjHXjB1P
+            1vMwpYW1gJhVMdthhNPOg3SEhf0pj1HZMA0R6rKO/oecDEbegRVjG5l7aH7trwsH
+            C+WFnvyfS74M0XwAZXZH7wKBgQCflY8GBVMbrmEZ6lvkDeFKBZTNWz5XhvQ9Aku5
+            pMtV/gjqLY/9AyXegkFptS+/zSi+RJQuW1LpildD1Fx7LMg6iyzU8BGdA/28J29r
+            mWVJgBjjDVpX3cj2MDg1gpDyrti5fBXC5TNm6L19RQLHNtQCovEx2/HBc/CFn2E4
+            bfB9hwKBgE0FVVmUBzDY/Zg4PBxR6rCGtEBdDv2skg6o6oVUkV+p2mvWI9+kXBZd
+            m0biCLgS0M8jExlBdpBdbWDArDMbQNTsCuHYa58V2EeZfQEjs5HNFtigv2MFsj40
+            vaC364bUbSqv4h3MO3W+EfwcCkoHk6EioL/OXIiAYm8wik3EqztG
+            -----END RSA PRIVATE KEY-----
+          script: |
+            cd /var/www/ap-backend
+            npm install
+            npm run build
+            pm2 reload ecosystem.config.js || pm2 start ecosystem.config.js
