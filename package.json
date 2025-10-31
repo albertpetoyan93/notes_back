@@ -7,7 +7,8 @@
     "dev:hot": "cross-env NODE_ENV=development npx ts-node -r ./preload.js ./src",
     "dev": "nodemon --exec \"npm run dev:hot\" --watch ./src -e ts",
     "start": "cross-env NODE_ENV=production node -r ./preload.js ./dist",
-    "migrate": "npx ts-node -r module-alias/register ./src/configs/DB/migrate.ts"
+    "migrate:prod": "cross-env NODE_ENV=production npx ts-node -r module-alias/register ./src/configs/DB/migrate.ts",
+    "migrate:dev": "cross-env NODE_ENV=development npx ts-node -r module-alias/register ./src/configs/DB/migrate.ts"
   },
   "engines": {
     "node": ">=16.0.0"
