@@ -1,5 +1,4 @@
 import logger from "jet-logger";
-import { getPoller } from "../services/DBPoller";
 import socketService from "../services/SocketManager";
 
 interface HealthMetrics {
