@@ -5,7 +5,7 @@ export default class NoteController {
   static getNotes = async (req: any, res: Response) => {
     try {
       const userId = req.user?.id;
-      const { category, project, search, isFavorite } = req.query;
+      const { category, project, search, isFavorite, sharedOnly } = req.query;
 
       if (!userId) {
         return res.status(401).json({ message: "Unauthorized" });
@@ -16,6 +16,7 @@ export default class NoteController {
         project,
         search,
         isFavorite: isFavorite === "true",
+        sharedOnly: sharedOnly === "true",
       });
 
       res.json(notes);
@@ -190,6 +191,107 @@ export default class NoteController {
     } catch (error) {
       console.error("Error fetching projects:", error);
       res.status(500).json({ message: "Error fetching projects" });
+    }
+  };
+
+  // Share a note with another user (or multiple)
+  static shareNote = async (req: any, res: Response) => {
+    try {
+      const userId = req.user?.id;
+      const { id } = req.params;
+      const { identifier, identifiers, email, username, permission } = req.body;
+
+      if (!userId) {
+        return res.status(401).json({ message: "Unauthorized" });
+      }
+
+      const noteId = parseInt(id);
+      if (isNaN(noteId)) {
+        return res.status(400).json({ message: "Invalid note ID" });
+      }
+
+      const list: string[] = Array.isArray(identifiers)
+        ? identifiers
+        : [identifier || email || username].filter(Boolean);
+
+      if (!list.length) {
+        return res
+          .status(400)
+          .json({ message: "At least one email or username is required" });
+      }
+
+      const result = await NoteService.shareNoteWithMany(
+        noteId,
+        userId,
+        list,
+        permission || "view"
+      );
+
+      if (!result.shared.length && result.failed.length) {
+        return res.status(400).json({
+          message: result.failed.map((f) => f.message).join("; "),
+          shared: result.shared,
+          failed: result.failed,
+        });
+      }
+
+      res.status(201).json(result);
+    } catch (error: any) {
+      console.error("Error sharing note:", error);
+      res
+        .status(error.status || 500)
+        .json({ message: error.message || "Error sharing note" });
+    }
+  };
+
+  // List shares for a note
+  static getNoteShares = async (req: any, res: Response) => {
+    try {
+      const userId = req.user?.id;
+      const { id } = req.params;
+
+      if (!userId) {
+        return res.status(401).json({ message: "Unauthorized" });
+      }
+
+      const noteId = parseInt(id);
+      if (isNaN(noteId)) {
+        return res.status(400).json({ message: "Invalid note ID" });
+      }
+
+      const shares = await NoteService.getNoteShares(noteId, userId);
+      res.json(shares);
+    } catch (error: any) {
+      console.error("Error fetching shares:", error);
+      res
+        .status(error.status || 500)
+        .json({ message: error.message || "Error fetching shares" });
+    }
+  };
+
+  // Revoke a share
+  static revokeShare = async (req: any, res: Response) => {
+    try {
+      const userId = req.user?.id;
+      const { id, userId: sharedWithUserId } = req.params;
+
+      if (!userId) {
+        return res.status(401).json({ message: "Unauthorized" });
+      }
+
+      const noteId = parseInt(id);
+      const targetUserId = parseInt(sharedWithUserId);
+      if (isNaN(noteId) || isNaN(targetUserId)) {
+        return res.status(400).json({ message: "Invalid ID" });
+      }
+
+      await NoteService.revokeShare(noteId, userId, targetUserId);
+      res.json({ message: "Share revoked successfully" });
+    } catch (error: any) {
+      console.error("Error revoking share:", error);
+      res
+        .status(error.status || 500)
+        .json({ message: error.message || "Error revoking share" });
     }
   };
 }

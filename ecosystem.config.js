@@ -1,7 +1,7 @@
 module.exports = {
   apps: [
     {
-      name: "ap-backend",
+      name: "notes-backend",
       script: "npm",
       args: "start",
       instances: 1,
@@ -9,7 +9,7 @@ module.exports = {
       watch: false,
       env: {
         NODE_ENV: "production",
-        PORT: 4000,
+        PORT: 9000,
       },
     },
   ],

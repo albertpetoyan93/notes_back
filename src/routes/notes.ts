@@ -16,6 +16,14 @@ router.get("/stats", NoteController.getNoteStats as RequestHandler);
 // Get all projects
 router.get("/projects", NoteController.getProjects as RequestHandler);
 
+// Share management (before /:id to avoid conflicts)
+router.get("/:id/shares", NoteController.getNoteShares as RequestHandler);
+router.post("/:id/share", NoteController.shareNote as RequestHandler);
+router.delete(
+  "/:id/share/:userId",
+  NoteController.revokeShare as RequestHandler
+);
+
 // Get a single note
 router.get("/:id", NoteController.getNote as RequestHandler);
 
