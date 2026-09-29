@@ -8,6 +8,7 @@ interface UserAttributes {
   email: string;
   password: string;
   fullName?: string;
+  refreshTokenId?: string | null;
   createdAt?: Date;
   updatedAt?: Date;
 }
@@ -15,7 +16,7 @@ interface UserAttributes {
 interface UserCreationAttributes
   extends Optional<
     UserAttributes,
-    "id" | "fullName" | "createdAt" | "updatedAt"
+    "id" | "fullName" | "refreshTokenId" | "createdAt" | "updatedAt"
   > {}
 
 class User
@@ -27,6 +28,7 @@ class User
   public email!: string;
   public password!: string;
   public fullName?: string;
+  public refreshTokenId?: string | null;
   public readonly createdAt!: Date;
   public readonly updatedAt!: Date;
 
@@ -61,6 +63,10 @@ User.init(
       allowNull: false,
     },
     fullName: {
+      type: DataTypes.STRING(255),
+      allowNull: true,
+    },
+    refreshTokenId: {
       type: DataTypes.STRING(255),
       allowNull: true,
     },

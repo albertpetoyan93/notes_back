@@ -1,25 +1,17 @@
-import JWT from "jsonwebtoken";
+import JWT, { JwtPayload } from "jsonwebtoken";
 import EnvVars from "@src/common/EnvVars";
 
 const { Secret } = EnvVars.Jwt;
 
-export const tokenGenerator = (data = {}, type: string) => {
-  const expiresIn =
-    type === "access"
-      ? process.env.ACCESS_TOKEN_EXPIRES
-      : process.env.REFRESH_TOKEN_EXPIRES;
-
-  const token = JWT.sign(data, Secret, { expiresIn });
-
-  return token;
-};
-
-export const tokenVerify = (hash?: string) => {
-  const token = hash?.split(" ")[1] as string;
+export const tokenVerify = (token?: string): JwtPayload => {
   if (!token) {
     return { userId: null };
   }
-  // const data: any = JWT.verify(token, "");
-  const data: any = JWT.decode(token, { complete: true });
-  return data?.payload;
+
+  const data = JWT.verify(token, Secret);
+  if (typeof data === "string") {
+    return { userId: null };
+  }
+
+  return data;
 };

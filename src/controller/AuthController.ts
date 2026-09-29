@@ -3,6 +3,21 @@ import HttpStatusCodes from "../common/HttpStatusCodes";
 import AuthService from "../services/AuthService";
 import { AuthRequest } from "@src/types";
 import UserService from "@src/services/UserService";
+import { clearAuthCookies, setAuthCookies } from "@src/util/authCookies";
+
+function publicUser(user: {
+  id: number;
+  username: string;
+  email: string;
+  fullName?: string | null;
+}) {
+  return {
+    id: user.id,
+    username: user.username,
+    email: user.email,
+    fullName: user.fullName,
+  };
+}
 
 export default class AuthController {
   static login = async (req: Request, res: Response, next: NextFunction) => {
@@ -14,19 +29,11 @@ export default class AuthController {
       const { email, password } = req.body;
 
       const user = await AuthService.login({ email, password });
-
-      const accessToken = AuthService.generateToken(user.id, user.email);
-      const refreshToken = AuthService.generateToken(user.id, user.email);
+      const session = await AuthService.issueSession(user);
+      setAuthCookies(res, session.accessToken, session.refreshToken);
 
       res.status(HttpStatusCodes.OK).send({
-        accessToken,
-        refreshToken,
-        user: {
-          id: user.id,
-          username: user.username,
-          email: user.email,
-          fullName: user.fullName,
-        },
+        user: publicUser(user),
       });
     } catch (e: any) {
       if (e.message === "Invalid credentials") {
@@ -49,19 +56,12 @@ export default class AuthController {
         fullName,
       });
 
-      const accessToken = AuthService.generateToken(user.id, user.username);
-      const refreshToken = AuthService.generateToken(user.id, user.username);
+      const session = await AuthService.issueSession(user);
+      setAuthCookies(res, session.accessToken, session.refreshToken);
 
       res.status(HttpStatusCodes.CREATED).send({
         message: "User registered successfully",
-        accessToken,
-        refreshToken,
-        user: {
-          id: user.id,
-          username: user.username,
-          email: user.email,
-          fullName: user.fullName,
-        },
+        user: publicUser(user),
       });
     } catch (e: any) {
       if (e.message === "Username or email already exists") {
@@ -72,6 +72,27 @@ export default class AuthController {
         next(e);
       }
     }
+  };
+
+  static refresh = async (req: Request, res: Response) => {
+    try {
+      const session = await AuthService.rotateSession(
+        req.cookies?.refresh_token
+      );
+      setAuthCookies(res, session.accessToken, session.refreshToken);
+      res.status(HttpStatusCodes.OK).send({ ok: true });
+    } catch {
+      clearAuthCookies(res);
+      res
+        .status(HttpStatusCodes.UNAUTHORIZED)
+        .send({ message: "Unauthorized" });
+    }
+  };
+
+  static logout = async (req: Request, res: Response) => {
+    await AuthService.revokeSession(req.cookies?.refresh_token);
+    clearAuthCookies(res);
+    res.status(HttpStatusCodes.OK).send({ ok: true });
   };
 
   static me = async (req: AuthRequest, res: Response, next: NextFunction) => {

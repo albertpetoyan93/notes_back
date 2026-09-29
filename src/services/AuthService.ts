@@ -1,6 +1,7 @@
 import User from "../models/User";
 import { Op } from "sequelize";
 import jwt from "jsonwebtoken";
+import crypto from "crypto";
 import EnvVars from "../common/EnvVars";
 
 interface RegisterData {
@@ -63,20 +64,79 @@ class AuthService {
     return user;
   }
 
-  /**
-   * Generate JWT token
-   */
-  static generateToken(userId: number, role: string = "user") {
-    const data = {
-      userId,
-      role,
+  static async issueSession(user: User) {
+    const refreshTokenId = crypto.randomBytes(32).toString("hex");
+    await user.update({ refreshTokenId });
+
+    return {
+      accessToken: this.signAccessToken(user.id),
+      refreshToken: this.signRefreshToken(user.id, refreshTokenId),
     };
+  }
 
-    const token = jwt.sign(data, EnvVars.Jwt.Secret, {
-      expiresIn: EnvVars.Jwt.Exp,
+  /**
+   * Exchange a valid refresh token for a new access token and a new refresh token.
+   * The previous refresh token stops working.
+   */
+  static async rotateSession(refreshToken?: string) {
+    if (!refreshToken) {
+      throw new Error("Invalid refresh token");
+    }
+
+    let payload: jwt.JwtPayload;
+    try {
+      const decoded = jwt.verify(refreshToken, EnvVars.Jwt.Secret);
+      if (typeof decoded === "string") {
+        throw new Error("Invalid refresh token");
+      }
+      payload = decoded;
+    } catch {
+      throw new Error("Invalid refresh token");
+    }
+
+    if (payload.type !== "refresh" || !payload.userId || !payload.jti) {
+      throw new Error("Invalid refresh token");
+    }
+
+    const user = await User.findByPk(payload.userId);
+    if (!user || user.refreshTokenId !== payload.jti) {
+      throw new Error("Invalid refresh token");
+    }
+
+    const refreshTokenId = crypto.randomBytes(32).toString("hex");
+    await user.update({ refreshTokenId });
+
+    return {
+      accessToken: this.signAccessToken(user.id),
+      refreshToken: this.signRefreshToken(user.id, refreshTokenId),
+    };
+  }
+
+  static async revokeSession(refreshToken?: string) {
+    if (!refreshToken) return;
+
+    try {
+      const decoded = jwt.verify(refreshToken, EnvVars.Jwt.Secret);
+      if (typeof decoded === "string" || decoded.type !== "refresh") return;
+      const user = await User.findByPk(decoded.userId);
+      if (user && user.refreshTokenId === decoded.jti) {
+        await user.update({ refreshTokenId: null });
+      }
+    } catch {
+      return;
+    }
+  }
+
+  private static signAccessToken(userId: number) {
+    return jwt.sign({ userId, type: "access" }, EnvVars.Jwt.Secret, {
+      expiresIn: "15m",
     });
+  }
 
-    return token;
+  private static signRefreshToken(userId: number, jti: string) {
+    return jwt.sign({ userId, type: "refresh", jti }, EnvVars.Jwt.Secret, {
+      expiresIn: "7d",
+    });
   }
 }
 

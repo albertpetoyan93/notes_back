@@ -18,6 +18,8 @@ router.get("/projects", NoteController.getProjects as RequestHandler);
 
 router.get("/export", NoteController.exportNotes as RequestHandler);
 router.post("/import", NoteController.importNotes as RequestHandler);
+router.delete("/trash", NoteController.emptyTrash as RequestHandler);
+router.post("/bulk", NoteController.bulkUpdate as RequestHandler);
 
 // Share management (before /:id to avoid conflicts)
 router.get("/:id/shares", NoteController.getNoteShares as RequestHandler);

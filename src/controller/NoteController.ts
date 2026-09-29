@@ -250,6 +250,41 @@ export default class NoteController {
     }
   };
 
+  static emptyTrash = async (req: any, res: Response) => {
+    try {
+      const userId = req.user?.id;
+      if (!userId) return res.status(401).json({ message: "Unauthorized" });
+      const deleted = await NoteService.emptyTrash(userId);
+      res.json({ deleted });
+    } catch (error) {
+      console.error("Error emptying trash:", error);
+      res.status(500).json({ message: "Error emptying trash" });
+    }
+  };
+
+  static bulkUpdate = async (req: any, res: Response) => {
+    try {
+      const userId = req.user?.id;
+      if (!userId) return res.status(401).json({ message: "Unauthorized" });
+      const { noteIds, action, collectionId } = req.body || {};
+      if (action !== "trash" && action !== "move") {
+        return res.status(400).json({ message: "Invalid action" });
+      }
+      const result = await NoteService.bulkUpdate(
+        userId,
+        Array.isArray(noteIds) ? noteIds : [],
+        action,
+        collectionId ?? null
+      );
+      res.json(result);
+    } catch (error: any) {
+      console.error("Error updating notes:", error);
+      res.status(error.status || 500).json({
+        message: error.status ? error.message : "Error updating notes",
+      });
+    }
+  };
+
   // Get note statistics
   static getNoteStats = async (req: any, res: Response) => {
     try {

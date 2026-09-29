@@ -173,6 +173,7 @@ class NoteService {
    * Get all notes for a user (owned + shared) with optional filters
    */
   async getNotes(userId: number, filters?: NoteFilters) {
+    await this.purgeOldTrash(userId);
     const { sharedNoteIds, permissionByNoteId, ownedCollectionIds } =
       await this.getAccessMaps(userId);
 
@@ -268,10 +269,20 @@ class NoteService {
     });
 
     const favoriteNoteIds = await this.getFavoriteNoteIds(userId);
+    const passwordHealthById = filters?.trash
+      ? new Map<number, { weak: boolean; reused: boolean; stale: boolean }>()
+      : await this.passwordHealthByNoteId(userId);
 
-    return notes.map((note) =>
-      this.annotateNote(note, userId, permissionByNoteId, favoriteNoteIds),
-    );
+    return notes.map((note) => {
+      const annotated = this.annotateNote(
+        note,
+        userId,
+        permissionByNoteId,
+        favoriteNoteIds
+      );
+      const passwordHealth = passwordHealthById.get(note.id);
+      return passwordHealth ? { ...annotated, passwordHealth } : annotated;
+    });
   }
 
   /**
@@ -499,6 +510,133 @@ class NoteService {
       permissionByNoteId,
       favoriteNoteIds
     );
+  }
+
+  private passwordValues(content: any): string[] {
+    if (!content || content.decryptionFailed) return [];
+    const fields = Array.isArray(content.customFields) ? content.customFields : [];
+    return fields
+      .filter(
+        (field: any) =>
+          typeof field?.label === "string" &&
+          /pass/i.test(field.label) &&
+          field.value
+      )
+      .map((field: any) => String(field.value));
+  }
+
+  private isWeakPassword(value: string) {
+    if (value.length < 12) return true;
+    let classes = 0;
+    if (/[a-z]/.test(value)) classes += 1;
+    if (/[A-Z]/.test(value)) classes += 1;
+    if (/[0-9]/.test(value)) classes += 1;
+    if (/[^A-Za-z0-9]/.test(value)) classes += 1;
+    return classes < 3;
+  }
+
+  private async passwordHealthByNoteId(userId: number) {
+    const notes = await Note.findAll({
+      where: { userId, category: { [Op.in]: ["password", "login"] } },
+      attributes: ["id", "content", "updatedAt", "category", "isEncrypted"],
+    });
+
+    const noteIdsBySecret = new Map<string, Set<number>>();
+    const valuesByNote = new Map<number, string[]>();
+    notes.forEach((note) => {
+      const values = this.passwordValues(note.content);
+      valuesByNote.set(note.id, values);
+      new Set(values).forEach((value) => {
+        const ids = noteIdsBySecret.get(value) || new Set<number>();
+        ids.add(note.id);
+        noteIdsBySecret.set(value, ids);
+      });
+    });
+
+    const staleBefore = Date.now() - 180 * 24 * 60 * 60 * 1000;
+    const health = new Map<
+      number,
+      { weak: boolean; reused: boolean; stale: boolean }
+    >();
+
+    notes.forEach((note) => {
+      const values = valuesByNote.get(note.id) || [];
+      if (!values.length) return;
+      const weak = values.some((value) => this.isWeakPassword(value));
+      const reused = values.some(
+        (value) => (noteIdsBySecret.get(value)?.size || 0) > 1
+      );
+      const stale = new Date(note.updatedAt).getTime() < staleBefore;
+      if (weak || reused || stale) {
+        health.set(note.id, { weak, reused, stale });
+      }
+    });
+
+    return health;
+  }
+
+  async purgeOldTrash(userId: number) {
+    const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    await sequelize.query(
+      `DELETE FROM "notes"
+       WHERE "userId" = :userId
+         AND "deletedAt" IS NOT NULL
+         AND "deletedAt" < :cutoff`,
+      { replacements: { userId, cutoff } }
+    );
+  }
+
+  async emptyTrash(userId: number) {
+    const [, metadata] = await sequelize.query(
+      `DELETE FROM "notes"
+       WHERE "userId" = :userId
+         AND "deletedAt" IS NOT NULL`,
+      { replacements: { userId } }
+    );
+    return Number((metadata as { rowCount?: number })?.rowCount || 0);
+  }
+
+  async bulkUpdate(
+    userId: number,
+    noteIds: number[],
+    action: "trash" | "move",
+    collectionId?: number | null
+  ) {
+    const ids = [...new Set(noteIds.map(Number).filter((id) => !isNaN(id)))];
+    if (!ids.length) {
+      throw Object.assign(new Error("Choose at least one note"), { status: 400 });
+    }
+
+    const notes = await Note.findAll({
+      where: { id: { [Op.in]: ids }, userId },
+    });
+    if (!notes.length) {
+      throw Object.assign(new Error("You can only change notes you own"), {
+        status: 400,
+      });
+    }
+
+    if (action === "trash") {
+      for (const note of notes) {
+        await note.destroy();
+      }
+      return { updated: notes.length, skipped: ids.length - notes.length };
+    }
+
+    let nextCollectionId: number | null = null;
+    let project: string | null = null;
+    if (collectionId) {
+      const access = await CollectionService.assertCanAdd(collectionId, userId);
+      nextCollectionId = access.collection.id;
+      project = access.collection.name;
+    }
+
+    await Note.update(
+      { collectionId: nextCollectionId, project },
+      { where: { id: { [Op.in]: notes.map((note) => note.id) }, userId } }
+    );
+
+    return { updated: notes.length, skipped: ids.length - notes.length };
   }
 
   /**
