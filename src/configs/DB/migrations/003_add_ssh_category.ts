@@ -1,6 +1,7 @@
 import { QueryInterface } from "sequelize";
 
 export default {
+  useTransaction: false,
   up: async (queryInterface: QueryInterface) => {
     // Add new value to enum by altering the column
     await queryInterface.sequelize.query(`

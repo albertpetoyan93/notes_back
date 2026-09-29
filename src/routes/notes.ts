@@ -16,6 +16,9 @@ router.get("/stats", NoteController.getNoteStats as RequestHandler);
 // Get all projects
 router.get("/projects", NoteController.getProjects as RequestHandler);
 
+router.get("/export", NoteController.exportNotes as RequestHandler);
+router.post("/import", NoteController.importNotes as RequestHandler);
+
 // Share management (before /:id to avoid conflicts)
 router.get("/:id/shares", NoteController.getNoteShares as RequestHandler);
 router.post("/:id/share", NoteController.shareNote as RequestHandler);
@@ -33,7 +36,11 @@ router.post("/", NoteController.createNote as RequestHandler);
 // Update a note
 router.put("/:id", NoteController.updateNote as RequestHandler);
 
-// Delete a note
+// Restore a trashed note
+router.post("/:id/favorite", NoteController.toggleFavorite as RequestHandler);
+router.post("/:id/restore", NoteController.restoreNote as RequestHandler);
+
+// Delete a note (soft delete)
 router.delete("/:id", NoteController.deleteNote as RequestHandler);
 
 export default router;

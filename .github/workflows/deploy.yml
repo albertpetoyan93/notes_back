@@ -1,0 +1,53 @@
+name: Deploy Backend
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy files to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: 22
+          source: "."
+          target: ${{ secrets.DEPLOY_PATH_BACK }}
+          overwrite: true
+          rm: false
+          exclude: "node_modules,dist,.git,env/production.env,env/development.env,*.log"
+
+      - name: Install, migrate, build, restart
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: 22
+          script: |
+            set -e
+            APP_DIR="${{ secrets.DEPLOY_PATH_BACK }}"
+            cd "$APP_DIR"
+
+            if [ ! -f env/production.env ]; then
+              echo "Missing env/production.env on server — create it once before deploying"
+              exit 1
+            fi
+
+            npm install
+            npm run build
+            npm run migrate:prod
+            pm2 reload ecosystem.config.js --update-env || pm2 start ecosystem.config.js
+            pm2 save
+            pm2 status notes-backend

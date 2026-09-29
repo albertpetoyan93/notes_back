@@ -16,12 +16,14 @@ const swaggerDocument = require("@src/views/swagger-output.json");
 
 const app = express();
 
+app.set("trust proxy", 1);
+
 app.use("/doc", swaggerUi.serve, swaggerUi.setup(swaggerDocument));
 
 // **** Setup **** //
 
 // Basic middleware
-app.use(express.json());
+app.use(express.json({ limit: "5mb" }));
 app.use(headers);
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser(EnvVars.CookieProps.Secret));

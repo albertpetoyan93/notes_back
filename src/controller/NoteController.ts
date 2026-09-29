@@ -5,7 +5,8 @@ export default class NoteController {
   static getNotes = async (req: any, res: Response) => {
     try {
       const userId = req.user?.id;
-      const { category, project, search, isFavorite, sharedOnly } = req.query;
+      const { category, project, tag, search, isFavorite, sharedOnly, trash, collection } =
+        req.query;
 
       if (!userId) {
         return res.status(401).json({ message: "Unauthorized" });
@@ -14,9 +15,15 @@ export default class NoteController {
       const notes = await NoteService.getNotes(userId, {
         category,
         project,
+        tag,
         search,
         isFavorite: isFavorite === "true",
         sharedOnly: sharedOnly === "true",
+        trash: trash === "true",
+        collectionId:
+          collection && !isNaN(parseInt(String(collection)))
+            ? parseInt(String(collection))
+            : undefined,
       });
 
       res.json(notes);
@@ -67,6 +74,7 @@ export default class NoteController {
         tags,
         isFavorite,
         isEncrypted,
+        collectionId,
       } = req.body;
 
       const note = await NoteService.createNote(userId, {
@@ -77,12 +85,65 @@ export default class NoteController {
         tags,
         isFavorite,
         isEncrypted,
+        collectionId,
       });
 
       res.status(201).json(note);
     } catch (error) {
       console.error("Error creating note:", error);
       res.status(500).json({ message: "Error creating note" });
+    }
+  };
+
+  static exportNotes = async (req: any, res: Response) => {
+    try {
+      const userId = req.user?.id;
+      if (!userId) return res.status(401).json({ message: "Unauthorized" });
+      const backup = await NoteService.exportNotes(userId);
+      res.json(backup);
+    } catch (error) {
+      console.error("Error exporting notes:", error);
+      res.status(500).json({ message: "Error exporting notes" });
+    }
+  };
+
+  static importNotes = async (req: any, res: Response) => {
+    try {
+      const userId = req.user?.id;
+      if (!userId) return res.status(401).json({ message: "Unauthorized" });
+      const notes = Array.isArray(req.body) ? req.body : req.body?.notes;
+      const result = await NoteService.importNotes(userId, notes);
+      res.status(201).json(result);
+    } catch (error: any) {
+      console.error("Error importing notes:", error);
+      res.status(error.status || 500).json({ message: "Error importing notes" });
+    }
+  };
+
+  // Toggle favorite for the current user
+  static toggleFavorite = async (req: any, res: Response) => {
+    try {
+      const userId = req.user?.id;
+      const { id } = req.params;
+
+      if (!userId) {
+        return res.status(401).json({ message: "Unauthorized" });
+      }
+
+      const noteId = parseInt(id);
+      if (isNaN(noteId)) {
+        return res.status(400).json({ message: "Invalid note ID" });
+      }
+
+      const note = await NoteService.toggleFavorite(noteId, userId);
+      if (!note) {
+        return res.status(404).json({ message: "Note not found" });
+      }
+
+      res.json(note);
+    } catch (error) {
+      console.error("Error toggling favorite:", error);
+      res.status(500).json({ message: "Error updating favorite" });
     }
   };
 
@@ -109,6 +170,7 @@ export default class NoteController {
         tags,
         isFavorite,
         isEncrypted,
+        collectionId,
       } = req.body;
 
       const note = await NoteService.updateNote(noteId, userId, {
@@ -119,6 +181,7 @@ export default class NoteController {
         tags,
         isFavorite,
         isEncrypted,
+        collectionId,
       });
 
       if (!note) {
@@ -153,10 +216,37 @@ export default class NoteController {
         return res.status(404).json({ message: "Note not found" });
       }
 
-      res.json({ message: "Note deleted successfully" });
+      res.json({ message: "Note moved to trash" });
     } catch (error) {
       console.error("Error deleting note:", error);
       res.status(500).json({ message: "Error deleting note" });
+    }
+  };
+
+  // Restore a note from trash
+  static restoreNote = async (req: any, res: Response) => {
+    try {
+      const userId = req.user?.id;
+      const { id } = req.params;
+
+      if (!userId) {
+        return res.status(401).json({ message: "Unauthorized" });
+      }
+
+      const noteId = parseInt(id);
+      if (isNaN(noteId)) {
+        return res.status(400).json({ message: "Invalid note ID" });
+      }
+
+      const restored = await NoteService.restoreNote(noteId, userId);
+      if (!restored) {
+        return res.status(404).json({ message: "Note not found in trash" });
+      }
+
+      res.json({ message: "Note restored" });
+    } catch (error) {
+      console.error("Error restoring note:", error);
+      res.status(500).json({ message: "Error restoring note" });
     }
   };
 
@@ -199,7 +289,8 @@ export default class NoteController {
     try {
       const userId = req.user?.id;
       const { id } = req.params;
-      const { identifier, identifiers, email, username, permission } = req.body;
+      const { identifier, identifiers, email, username, permission, expiresIn } =
+        req.body;
 
       if (!userId) {
         return res.status(401).json({ message: "Unauthorized" });
@@ -220,11 +311,22 @@ export default class NoteController {
           .json({ message: "At least one email or username is required" });
       }
 
+      const allowedExpiry = [1, 7, 30];
+      let expiresAt: Date | null = null;
+      if (expiresIn && expiresIn !== "never") {
+        const days = Number(expiresIn);
+        if (!allowedExpiry.includes(days)) {
+          return res.status(400).json({ message: "Invalid expiry" });
+        }
+        expiresAt = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
+      }
+
       const result = await NoteService.shareNoteWithMany(
         noteId,
         userId,
         list,
-        permission || "view"
+        permission || "view",
+        expiresAt,
       );
 
       if (!result.shared.length && result.failed.length) {

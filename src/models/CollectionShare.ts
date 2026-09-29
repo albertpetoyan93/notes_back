@@ -1,11 +1,10 @@
 import { DataTypes, Model, Optional } from "sequelize";
 import sequelize from "../configs/DB/sequelize";
+import { SharePermission } from "./NoteShare";
 
-export type SharePermission = "view" | "edit";
-
-interface NoteShareAttributes {
+interface CollectionShareAttributes {
   id: number;
-  noteId: number;
+  collectionId: number;
   sharedByUserId: number;
   sharedWithUserId: number;
   permission: SharePermission;
@@ -14,18 +13,17 @@ interface NoteShareAttributes {
   updatedAt?: Date;
 }
 
-interface NoteShareCreationAttributes
-  extends Optional<
-    NoteShareAttributes,
-    "id" | "permission" | "expiresAt" | "createdAt" | "updatedAt"
-  > {}
+type CollectionShareCreation = Optional<
+  CollectionShareAttributes,
+  "id" | "permission" | "expiresAt" | "createdAt" | "updatedAt"
+>;
 
-class NoteShare
-  extends Model<NoteShareAttributes, NoteShareCreationAttributes>
-  implements NoteShareAttributes
+class CollectionShare
+  extends Model<CollectionShareAttributes, CollectionShareCreation>
+  implements CollectionShareAttributes
 {
   public id!: number;
-  public noteId!: number;
+  public collectionId!: number;
   public sharedByUserId!: number;
   public sharedWithUserId!: number;
   public permission!: SharePermission;
@@ -34,14 +32,14 @@ class NoteShare
   public readonly updatedAt!: Date;
 }
 
-NoteShare.init(
+CollectionShare.init(
   {
     id: {
       type: DataTypes.INTEGER,
       autoIncrement: true,
       primaryKey: true,
     },
-    noteId: {
+    collectionId: {
       type: DataTypes.INTEGER,
       allowNull: false,
     },
@@ -65,16 +63,16 @@ NoteShare.init(
   },
   {
     sequelize,
-    tableName: "note_shares",
+    tableName: "collection_shares",
     timestamps: true,
     indexes: [
       {
         unique: true,
-        fields: ["noteId", "sharedWithUserId"],
-        name: "note_shares_note_user_unique",
+        fields: ["collectionId", "sharedWithUserId"],
+        name: "collection_shares_collection_user_unique",
       },
     ],
   }
 );
 
-export default NoteShare;
+export default CollectionShare;

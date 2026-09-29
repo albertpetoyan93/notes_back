@@ -103,4 +103,17 @@ export default class AuthController {
       next(e);
     }
   };
+
+  static searchUsers = async (req: AuthRequest, res: Response) => {
+    const userId = req.user?.id;
+    const q = String(req.query.q || "");
+
+    if (!userId) {
+      res.status(HttpStatusCodes.UNAUTHORIZED).send({ message: "Unauthorized" });
+      return;
+    }
+
+    const users = await UserService.searchUsers(q, userId);
+    res.status(HttpStatusCodes.OK).send(users);
+  };
 }

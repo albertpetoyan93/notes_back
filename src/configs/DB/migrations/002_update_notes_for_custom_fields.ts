@@ -6,6 +6,8 @@ import { QueryInterface, DataTypes } from "sequelize";
  * - Ensures content column can store JSON data
  * - Verifies category enum includes all types
  */
+export const useTransaction = false;
+
 export async function up() {
   const queryInterface: QueryInterface = sequelize.getQueryInterface();
 

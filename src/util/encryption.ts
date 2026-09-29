@@ -95,6 +95,10 @@ export function decryptContent(encryptedContent: any): any {
     }
   } catch (error) {
     console.error("Error decrypting content:", error);
-    return encryptedContent; // Return original if decryption fails
+    return {
+      decryptionFailed: true,
+      mainContent: "",
+      customFields: [],
+    };
   }
 }

@@ -2,6 +2,12 @@ import { QueryInterface, DataTypes } from "sequelize";
 
 export default {
   up: async (queryInterface: QueryInterface) => {
+    const tables = await queryInterface.showAllTables();
+    const names = tables.map((table) => String(table));
+    if (names.includes("note_shares")) {
+      return;
+    }
+
     await queryInterface.createTable("note_shares", {
       id: {
         type: DataTypes.INTEGER,

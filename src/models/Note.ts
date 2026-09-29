@@ -8,11 +8,12 @@ interface NoteAttributes {
   content: Record<string, any>; // JSONB object for flexible key-value storage
   comment?: string;
   category: "note" | "password" | "login" | "command" | "ssh" | "db" | "other";
-  project?: string;
+  project?: string | null;
   tags?: string[];
-  isFavorite: boolean;
   isEncrypted: boolean;
   userId: number;
+  collectionId?: number | null;
+  deletedAt?: Date | null;
   createdAt?: Date;
   updatedAt?: Date;
 }
@@ -24,8 +25,9 @@ interface NoteCreationAttributes
     | "comment"
     | "project"
     | "tags"
-    | "isFavorite"
     | "isEncrypted"
+    | "collectionId"
+    | "deletedAt"
     | "createdAt"
     | "updatedAt"
   > {}
@@ -46,11 +48,12 @@ class Note
     | "ssh"
     | "db"
     | "other";
-  public project?: string;
+  public project?: string | null;
   public tags?: string[];
-  public isFavorite!: boolean;
   public isEncrypted!: boolean;
   public userId!: number;
+  public collectionId?: number | null;
+  public deletedAt?: Date | null;
   public readonly createdAt!: Date;
   public readonly updatedAt!: Date;
 }
@@ -99,11 +102,6 @@ Note.init(
       allowNull: true,
       defaultValue: [],
     },
-    isFavorite: {
-      type: DataTypes.BOOLEAN,
-      allowNull: false,
-      defaultValue: false,
-    },
     isEncrypted: {
       type: DataTypes.BOOLEAN,
       allowNull: false,
@@ -113,11 +111,20 @@ Note.init(
       type: DataTypes.INTEGER,
       allowNull: false,
     },
+    collectionId: {
+      type: DataTypes.INTEGER,
+      allowNull: true,
+    },
+    deletedAt: {
+      type: DataTypes.DATE,
+      allowNull: true,
+    },
   },
   {
     sequelize,
     tableName: "notes",
     timestamps: true,
+    paranoid: true,
     hooks: {
       // Auto-enable encryption for password and login categories
       beforeValidate: async (note: Note) => {

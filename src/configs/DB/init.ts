@@ -14,10 +14,6 @@ export async function initializeDatabase(): Promise<void> {
     // Test database connection
     await sequelize.authenticate();
     logger.info("Database connection established successfully");
-
-    // Optionally sync models (be careful in production)
-    // await sequelize.sync({ alter: false });
-    // logger.info("Database models synchronized");
   } catch (error) {
     logger.err("Unable to initialize database:", error);
     logger.err(`Error message: ${error.message}`);

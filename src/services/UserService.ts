@@ -1,4 +1,5 @@
 import User from "@src/models/User";
+import { Op } from "sequelize";
 
 class UserService {
   /**
@@ -10,6 +11,28 @@ class UserService {
     });
 
     return user;
+  }
+
+  /**
+   * Search users by email, username, or name (excludes the caller)
+   */
+  static async searchUsers(query: string, excludeUserId: number) {
+    const q = query.trim();
+    if (q.length < 2) return [];
+
+    return User.findAll({
+      where: {
+        id: { [Op.ne]: excludeUserId },
+        [Op.or]: [
+          { email: { [Op.iLike]: `%${q}%` } },
+          { username: { [Op.iLike]: `%${q}%` } },
+          { fullName: { [Op.iLike]: `%${q}%` } },
+        ],
+      },
+      attributes: ["id", "username", "email", "fullName"],
+      limit: 8,
+      order: [["username", "ASC"]],
+    });
   }
 
   /**

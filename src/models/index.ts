@@ -9,6 +9,9 @@ import sequelize from "@src/configs/DB/sequelize";
 import User from "./User";
 import Note from "./Note";
 import NoteShare from "./NoteShare";
+import NoteFavorite from "./NoteFavorite";
+import Collection from "./Collection";
+import CollectionShare from "./CollectionShare";
 
 // Define all associations here to avoid circular dependencies
 function setupAssociations() {
@@ -71,6 +74,104 @@ function setupAssociations() {
     onUpdate: "cascade",
     onDelete: "cascade",
   });
+
+  Note.hasMany(NoteFavorite, {
+    as: "favorites",
+    foreignKey: "noteId",
+    onUpdate: "cascade",
+    onDelete: "cascade",
+  });
+
+  NoteFavorite.belongsTo(Note, {
+    as: "note",
+    foreignKey: "noteId",
+    onUpdate: "cascade",
+    onDelete: "cascade",
+  });
+
+  User.hasMany(NoteFavorite, {
+    as: "noteFavorites",
+    foreignKey: "userId",
+    onUpdate: "cascade",
+    onDelete: "cascade",
+  });
+
+  NoteFavorite.belongsTo(User, {
+    as: "user",
+    foreignKey: "userId",
+    onUpdate: "cascade",
+    onDelete: "cascade",
+  });
+
+  User.hasMany(Collection, {
+    as: "collections",
+    foreignKey: "userId",
+    onUpdate: "cascade",
+    onDelete: "cascade",
+  });
+
+  Collection.belongsTo(User, {
+    as: "user",
+    foreignKey: "userId",
+    onUpdate: "cascade",
+    onDelete: "cascade",
+  });
+
+  Collection.hasMany(Note, {
+    as: "notes",
+    foreignKey: "collectionId",
+    onUpdate: "cascade",
+    onDelete: "set null",
+  });
+
+  Note.belongsTo(Collection, {
+    as: "collection",
+    foreignKey: "collectionId",
+    onUpdate: "cascade",
+    onDelete: "set null",
+  });
+
+  Collection.hasMany(CollectionShare, {
+    as: "shares",
+    foreignKey: "collectionId",
+    onUpdate: "cascade",
+    onDelete: "cascade",
+  });
+
+  CollectionShare.belongsTo(Collection, {
+    as: "collection",
+    foreignKey: "collectionId",
+    onUpdate: "cascade",
+    onDelete: "cascade",
+  });
+
+  User.hasMany(CollectionShare, {
+    as: "collectionSharesGiven",
+    foreignKey: "sharedByUserId",
+    onUpdate: "cascade",
+    onDelete: "cascade",
+  });
+
+  CollectionShare.belongsTo(User, {
+    as: "sharedBy",
+    foreignKey: "sharedByUserId",
+    onUpdate: "cascade",
+    onDelete: "cascade",
+  });
+
+  User.hasMany(CollectionShare, {
+    as: "collectionSharesReceived",
+    foreignKey: "sharedWithUserId",
+    onUpdate: "cascade",
+    onDelete: "cascade",
+  });
+
+  CollectionShare.belongsTo(User, {
+    as: "sharedWith",
+    foreignKey: "sharedWithUserId",
+    onUpdate: "cascade",
+    onDelete: "cascade",
+  });
 }
 
 // Export default object with all models
@@ -79,5 +180,8 @@ export default {
   User,
   Note,
   NoteShare,
+  NoteFavorite,
+  Collection,
+  CollectionShare,
   setupAssociations,
 };
