@@ -4,6 +4,7 @@ import AuthService from "../services/AuthService";
 import { AuthRequest } from "@src/types";
 import UserService from "@src/services/UserService";
 import { clearAuthCookies, setAuthCookies } from "@src/util/authCookies";
+import User from "@src/models/User";
 
 function publicUser(user: {
   id: number;
@@ -95,6 +96,39 @@ export default class AuthController {
       } else {
         next(e);
       }
+    }
+  };
+
+  static extensionConnect = async (
+    req: AuthRequest,
+    res: Response,
+    next: NextFunction
+  ) => {
+    try {
+      const userId = req.user?.id;
+      if (!userId) {
+        res
+          .status(HttpStatusCodes.UNAUTHORIZED)
+          .send({ message: "Sign in on the website first" });
+        return;
+      }
+
+      const user = await User.findByPk(userId);
+      if (!user) {
+        res
+          .status(HttpStatusCodes.UNAUTHORIZED)
+          .send({ message: "Sign in on the website first" });
+        return;
+      }
+
+      const session = await AuthService.issueExtensionSession(user);
+      res.status(HttpStatusCodes.OK).send({
+        user: publicUser(user),
+        accessToken: session.accessToken,
+        refreshToken: session.refreshToken,
+      });
+    } catch (e) {
+      next(e);
     }
   };
 
