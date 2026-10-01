@@ -74,6 +74,48 @@ export default class AuthController {
     }
   };
 
+  static extensionLogin = async (
+    req: Request,
+    res: Response,
+    next: NextFunction
+  ) => {
+    try {
+      const { email, password } = req.body;
+      const user = await AuthService.login({ email, password });
+      const session = await AuthService.issueExtensionSession(user);
+
+      res.status(HttpStatusCodes.OK).send({
+        user: publicUser(user),
+        accessToken: session.accessToken,
+        refreshToken: session.refreshToken,
+      });
+    } catch (e: any) {
+      if (e.message === "Invalid credentials") {
+        res.status(HttpStatusCodes.UNAUTHORIZED).send({ message: e.message });
+      } else {
+        next(e);
+      }
+    }
+  };
+
+  static extensionRefresh = async (req: Request, res: Response) => {
+    try {
+      const session = await AuthService.rotateExtensionSession(
+        req.body?.refreshToken
+      );
+      res.status(HttpStatusCodes.OK).send(session);
+    } catch {
+      res
+        .status(HttpStatusCodes.UNAUTHORIZED)
+        .send({ message: "Unauthorized" });
+    }
+  };
+
+  static extensionLogout = async (req: Request, res: Response) => {
+    await AuthService.revokeExtensionSession(req.body?.refreshToken);
+    res.status(HttpStatusCodes.OK).send({ ok: true });
+  };
+
   static refresh = async (req: Request, res: Response) => {
     try {
       const session = await AuthService.rotateSession(
@@ -134,7 +176,13 @@ export default class AuthController {
       return;
     }
 
-    const users = await UserService.searchUsers(q, userId);
+    const companyRaw = req.query.company;
+    const companyId = companyRaw ? parseInt(String(companyRaw), 10) : undefined;
+    const users = await UserService.searchUsers(
+      q,
+      userId,
+      companyId && !isNaN(companyId) ? companyId : undefined
+    );
     res.status(HttpStatusCodes.OK).send(users);
   };
 }

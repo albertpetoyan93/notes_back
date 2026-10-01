@@ -31,6 +31,18 @@ export default {
     BotToken: process.env.SLACK_BOT_TOKEN ?? "",
     ChannelId: process.env.SLACK_CHANNEL_ID ?? "",
   },
+  Mail: {
+    Host: process.env.SMTP_HOST ?? "",
+    Port: Number(process.env.SMTP_PORT ?? 587),
+    Secure: process.env.SMTP_SECURE === "true",
+    User: process.env.SMTP_USER ?? "",
+    Password: process.env.SMTP_PASSWORD ?? "",
+    From: process.env.MAIL_FROM ?? "",
+  },
+  FrontendOrigin: (process.env.FRONTEND_ORIGIN ?? "")
+    .split(",")[0]
+    .trim()
+    .replace(/\/$/, ""),
   Polling: {
     Interval: Number(process.env.POLLING_INTERVAL ?? 5000),
     LookbackWindow: Number(process.env.LOOKBACK_WINDOW ?? 300000), // 5 minutes in ms

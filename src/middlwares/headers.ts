@@ -10,6 +10,8 @@ function allowedOrigin(origin: string | undefined) {
 
   if (configured.includes(origin)) return origin;
 
+  if (/^chrome-extension:\/\/[a-p]{32}$/.test(origin)) return origin;
+
   if (
     process.env.NODE_ENV !== "production" &&
     /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)
@@ -37,7 +39,7 @@ export default function headers(
     );
     res.setHeader(
       "Access-Control-Allow-Headers",
-      "Origin, X-Requested-With, Content-Type, Accept"
+      "Origin, X-Requested-With, Content-Type, Accept, Authorization"
     );
   }
 

@@ -12,6 +12,8 @@ import NoteShare from "./NoteShare";
 import NoteFavorite from "./NoteFavorite";
 import Collection from "./Collection";
 import CollectionShare from "./CollectionShare";
+import Company from "./Company";
+import CompanyMember from "./CompanyMember";
 
 // Define all associations here to avoid circular dependencies
 function setupAssociations() {
@@ -172,6 +174,34 @@ function setupAssociations() {
     onUpdate: "cascade",
     onDelete: "cascade",
   });
+
+  Company.hasMany(CompanyMember, {
+    as: "members",
+    foreignKey: "companyId",
+    onUpdate: "cascade",
+    onDelete: "cascade",
+  });
+
+  CompanyMember.belongsTo(Company, {
+    as: "company",
+    foreignKey: "companyId",
+    onUpdate: "cascade",
+    onDelete: "cascade",
+  });
+
+  User.hasMany(CompanyMember, {
+    as: "companyMemberships",
+    foreignKey: "userId",
+    onUpdate: "cascade",
+    onDelete: "cascade",
+  });
+
+  CompanyMember.belongsTo(User, {
+    as: "user",
+    foreignKey: "userId",
+    onUpdate: "cascade",
+    onDelete: "cascade",
+  });
 }
 
 // Export default object with all models
@@ -183,5 +213,7 @@ export default {
   NoteFavorite,
   Collection,
   CollectionShare,
+  Company,
+  CompanyMember,
   setupAssociations,
 };

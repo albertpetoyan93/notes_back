@@ -4,6 +4,8 @@ import NoteFavorite from "../models/NoteFavorite";
 import User from "../models/User";
 import Collection from "../models/Collection";
 import CollectionShare from "../models/CollectionShare";
+import CompanyMember from "../models/CompanyMember";
+import EmailService from "./EmailService";
 import NotificationService from "./NotificationService";
 import CollectionService from "./CollectionService";
 import { Op } from "sequelize";
@@ -18,6 +20,7 @@ interface NoteFilters {
   sharedOnly?: boolean;
   trash?: boolean;
   collectionId?: number;
+  companyId?: number;
 }
 
 interface CreateNoteData {
@@ -42,6 +45,10 @@ interface UpdateNoteData {
   collectionId?: number | null;
 }
 
+function storedCategory<T extends string | undefined>(category: T): T {
+  return (category === "login" ? "password" : category) as T;
+}
+
 class NoteService {
   private activeShareFilter(where: Record<string, unknown>) {
     return {
@@ -55,7 +62,19 @@ class NoteService {
       {
         model: Collection,
         as: "collection",
-        attributes: ["id", "name"],
+        attributes: ["id", "name", "companyId"],
+        required: false,
+      },
+    ];
+  }
+
+  private noteIncludes() {
+    return [
+      ...this.collectionInclude(),
+      {
+        model: User,
+        as: "user",
+        attributes: ["id", "username", "fullName"],
         required: false,
       },
     ];
@@ -160,6 +179,12 @@ class NoteService {
       : permissionByNoteId.get(note.id) || "view";
 
     const json = note.toJSON() as any;
+    const owner = json.user;
+    delete json.user;
+    if (!isOwner) {
+      if (!json.collection?.companyId) delete json.collection;
+      json.sharedByName = owner?.fullName || owner?.username || "Someone";
+    }
     return {
       ...json,
       isOwner,
@@ -179,7 +204,26 @@ class NoteService {
 
     let whereClause: any;
 
-    if (filters?.collectionId) {
+    if (filters?.companyId) {
+      let companyCollections: { id: number }[] = [];
+      try {
+        companyCollections = await CollectionService.listForCompany(
+          filters.companyId,
+          userId
+        );
+      } catch (error: any) {
+        if (error?.status === 404 || error?.status === 403) return [];
+        throw error;
+      }
+      const ids = companyCollections.map((collection) => collection.id);
+      whereClause = filters.collectionId
+        ? {
+            collectionId: ids.includes(filters.collectionId) ? filters.collectionId : -1,
+          }
+        : {
+            collectionId: { [Op.in]: ids.length ? ids : [-1] },
+          };
+    } else if (filters?.collectionId) {
       const access = await CollectionService.getAccess(
         filters.collectionId,
         userId
@@ -216,7 +260,7 @@ class NoteService {
     }
 
     if (filters?.category && filters.category !== "all") {
-      whereClause.category = filters.category;
+      whereClause.category = storedCategory(filters.category);
     }
 
     if (filters?.project && filters.project !== "all") {
@@ -224,6 +268,15 @@ class NoteService {
     }
 
     const andClauses = [...(whereClause[Op.and] || [])];
+
+    if (!filters?.companyId && !filters?.collectionId) {
+      andClauses.push({
+        [Op.or]: [
+          { collectionId: { [Op.is]: null } },
+          { "$collection.companyId$": { [Op.is]: null } },
+        ],
+      });
+    }
 
     if (filters?.isFavorite) {
       const favoriteIds = [...(await this.getFavoriteNoteIds(userId))];
@@ -263,7 +316,7 @@ class NoteService {
 
     const notes = await Note.findAll({
       where: whereClause,
-      include: this.collectionInclude(),
+      include: this.noteIncludes(),
       paranoid: !filters?.trash,
       order: [[filters?.trash ? "deletedAt" : "updatedAt", "DESC"]],
     });
@@ -402,7 +455,7 @@ class NoteService {
         await this.createNote(userId, {
           title: title.slice(0, 255),
           content: item.content,
-          category: item.category,
+          category: storedCategory(item.category),
           collectionId,
           tags,
           isFavorite: Boolean(item.isFavorite),
@@ -435,7 +488,7 @@ class NoteService {
     const note = await Note.create({
       title: data.title,
       content: data.content,
-      category: data.category || "note",
+      category: storedCategory(data.category) || "note",
       project,
       collectionId,
       tags: data.tags || [],
@@ -470,7 +523,8 @@ class NoteService {
     const payload: any = {
       title: data.title !== undefined ? data.title : note.title,
       content: data.content !== undefined ? data.content : note.content,
-      category: data.category !== undefined ? data.category : note.category,
+      category:
+        data.category !== undefined ? storedCategory(data.category) : storedCategory(note.category),
       tags: data.tags !== undefined ? data.tags : note.tags,
       isEncrypted:
         data.isEncrypted !== undefined ? data.isEncrypted : note.isEncrypted,
@@ -510,6 +564,149 @@ class NoteService {
       permissionByNoteId,
       favoriteNoteIds
     );
+  }
+
+  async autofill(userId: number, host: string, query = "") {
+    const pageHost = this.normalizeHost(host);
+    const q = query.trim().toLowerCase();
+    if (!pageHost && q.length < 2) {
+      throw Object.assign(new Error("Invalid site"), { status: 400 });
+    }
+
+    const notes = await Note.findAll({
+      where: {
+        userId,
+        category: { [Op.in]: ["password", "login"] },
+      },
+      attributes: ["id", "title", "content", "isEncrypted"],
+    });
+
+    const matches: { id: number; title: string; username: string; password: string }[] =
+      [];
+
+    notes.forEach((note) => {
+      const content = note.content as any;
+      if (!content || content.decryptionFailed) return;
+      const fields = Array.isArray(content.customFields) ? content.customFields : [];
+      const matched = q
+        ? this.noteMatchesQuery(note.title, fields, q)
+        : this.noteMatchesHost(note.title, fields, pageHost);
+      if (!matched) return;
+      const password = this.pickPassword(fields);
+      if (!password) return;
+      matches.push({
+        id: note.id,
+        title: note.title,
+        username: this.pickUsername(fields),
+        password,
+      });
+    });
+
+    return matches.slice(0, 20);
+  }
+
+  private normalizeHost(value: string) {
+    const host = String(value || "")
+      .trim()
+      .toLowerCase()
+      .replace(/\.$/, "")
+      .replace(/^www\./, "");
+    if (!host || host.length > 253 || !/^[a-z0-9.-]+$/.test(host)) return "";
+    return host;
+  }
+
+  private rootHost(host: string) {
+    if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) return host;
+    const multi = ["co.uk", "com.au", "co.jp", "com.br", "co.nz", "com.tr", "co.za"];
+    for (const suffix of multi) {
+      if (host.endsWith(`.${suffix}`)) {
+        const left = host.slice(0, -(suffix.length + 1));
+        const brand = left.split(".").pop();
+        return brand ? `${brand}.${suffix}` : host;
+      }
+    }
+    const parts = host.split(".");
+    return parts.length <= 2 ? host : parts.slice(-2).join(".");
+  }
+
+  private hostFromText(value: string) {
+    const trimmed = String(value || "").trim();
+    if (!trimmed || /\s/.test(trimmed) || trimmed.includes("@")) return "";
+    try {
+      const withProtocol = /^https?:\/\//i.test(trimmed)
+        ? trimmed
+        : `https://${trimmed}`;
+      const hostname = new URL(withProtocol).hostname;
+      if (!hostname.includes(".")) return "";
+      return this.normalizeHost(hostname);
+    } catch {
+      return "";
+    }
+  }
+
+  private noteMatchesHost(title: string, fields: any[], pageHost: string) {
+    const site = this.rootHost(pageHost);
+    const texts = this.matchTexts(title, fields);
+    if (texts.some((text) => this.nameMatchesHost(text, pageHost))) return true;
+
+    const savedHosts = texts
+      .map((text) => this.hostFromText(text))
+      .filter((host) => host);
+    return savedHosts.some((host) => this.rootHost(host) === site);
+  }
+
+  private noteMatchesQuery(title: string, fields: any[], query: string) {
+    return this.matchTexts(title, fields).some((text) =>
+      text.toLowerCase().includes(query)
+    );
+  }
+
+  private matchTexts(title: string, fields: any[]) {
+    return [
+      title,
+      ...fields
+        .filter(
+          (field) =>
+            field?.value &&
+            !(typeof field.label === "string" && /pass/i.test(field.label))
+        )
+        .map((field) => String(field.value)),
+    ];
+  }
+
+  private nameMatchesHost(value: string, pageHost: string) {
+    const labels = pageHost.toLowerCase().split(".");
+    const ignored = new Set(["www", "com", "net", "org", "io", "app", "ru", "co"]);
+    return value
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter((token) => token.length >= 2 && !ignored.has(token))
+      .some(
+        (token) =>
+          labels.includes(token) ||
+          (token.length >= 4 && labels.some((label) => label.includes(token)))
+      );
+  }
+
+  private pickPassword(fields: any[]) {
+    const labeled = fields.filter(
+      (field) => field?.value && typeof field.label === "string" && /pass/i.test(field.label)
+    );
+    const preferred = labeled.find(
+      (field) => /password/i.test(field.label) && !/key/i.test(field.label)
+    );
+    return String((preferred || labeled[0])?.value || "");
+  }
+
+  private pickUsername(fields: any[]) {
+    const field = fields.find(
+      (item) =>
+        item?.value &&
+        typeof item.label === "string" &&
+        /user|email|login/i.test(item.label) &&
+        !/pass/i.test(item.label)
+    );
+    return field ? String(field.value) : "";
   }
 
   private passwordValues(content: any): string[] {
@@ -749,7 +946,7 @@ class NoteService {
    */
   async getNoteAccess(noteId: number, userId: number) {
     const note = await Note.findByPk(noteId, {
-      include: this.collectionInclude(),
+      include: this.noteIncludes(),
     });
     if (!note) return null;
 
@@ -765,7 +962,15 @@ class NoteService {
 
     if (note.collectionId) {
       const collection = await Collection.findByPk(note.collectionId);
-      if (collection?.userId === userId) {
+      if (collection?.companyId) {
+        const companyAccess = await CollectionService.getAccess(note.collectionId, userId);
+        if (!companyAccess) return null;
+        const fromCompany = companyAccess.permission === "owner" ? "edit" : companyAccess.permission;
+        if (!permission || (permission === "view" && fromCompany === "edit")) {
+          permission = fromCompany;
+        }
+        return { note, permission };
+      } else if (collection?.userId === userId) {
         permission = "edit";
       } else {
         const collectionShare = await CollectionShare.findOne({
@@ -837,6 +1042,29 @@ class NoteService {
       });
     }
 
+    let companyId: number | null = null;
+    if (note.collectionId) {
+      const collection = await Collection.findByPk(note.collectionId, {
+        attributes: ["id", "companyId"],
+      });
+      companyId = collection?.companyId ?? null;
+      if (companyId) {
+        const member = await CompanyMember.findOne({
+          where: {
+            companyId,
+            userId: recipient.id,
+            status: "active",
+          },
+        });
+        if (!member) {
+          throw Object.assign(
+            new Error("Company notes can only be shared with people in this company"),
+            { status: 400 }
+          );
+        }
+      }
+    }
+
     if (permission !== "view" && permission !== "edit") {
       throw Object.assign(new Error("Permission must be view or edit"), {
         status: 400,
@@ -868,6 +1096,11 @@ class NoteService {
       `${ownerName} shared "${note.title}" with you`,
       note.id
     );
+    await EmailService.sendNoteShare({
+      to: recipient.email,
+      noteTitle: note.title,
+      companyId,
+    });
 
     return NoteShare.findByPk(share.id, {
       include: [

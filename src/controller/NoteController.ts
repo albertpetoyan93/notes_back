@@ -2,10 +2,33 @@ import { Response } from "express";
 import NoteService from "../services/NoteService";
 
 export default class NoteController {
+  static autofill = async (req: any, res: Response) => {
+    try {
+      const userId = req.user?.id;
+      if (!userId) {
+        return res.status(401).json({ message: "Unauthorized" });
+      }
+
+      const matches = await NoteService.autofill(
+        userId,
+        String(req.query.host || ""),
+        String(req.query.q || "")
+      );
+      res.json(matches);
+    } catch (error: any) {
+      const status = error?.status || 500;
+      if (status === 400) {
+        return res.status(400).json({ message: error.message });
+      }
+      console.error("Error matching logins:", error);
+      res.status(500).json({ message: "Error matching logins" });
+    }
+  };
+
   static getNotes = async (req: any, res: Response) => {
     try {
       const userId = req.user?.id;
-      const { category, project, tag, search, isFavorite, sharedOnly, trash, collection } =
+      const { category, project, tag, search, isFavorite, sharedOnly, trash, collection, company } =
         req.query;
 
       if (!userId) {
@@ -23,6 +46,10 @@ export default class NoteController {
         collectionId:
           collection && !isNaN(parseInt(String(collection)))
             ? parseInt(String(collection))
+            : undefined,
+        companyId:
+          company && !isNaN(parseInt(String(company)))
+            ? parseInt(String(company))
             : undefined,
       });
 

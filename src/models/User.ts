@@ -9,6 +9,7 @@ interface UserAttributes {
   password: string;
   fullName?: string;
   refreshTokenId?: string | null;
+  extensionRefreshTokenId?: string | null;
   createdAt?: Date;
   updatedAt?: Date;
 }
@@ -16,7 +17,12 @@ interface UserAttributes {
 interface UserCreationAttributes
   extends Optional<
     UserAttributes,
-    "id" | "fullName" | "refreshTokenId" | "createdAt" | "updatedAt"
+    | "id"
+    | "fullName"
+    | "refreshTokenId"
+    | "extensionRefreshTokenId"
+    | "createdAt"
+    | "updatedAt"
   > {}
 
 class User
@@ -29,6 +35,7 @@ class User
   public password!: string;
   public fullName?: string;
   public refreshTokenId?: string | null;
+  public extensionRefreshTokenId?: string | null;
   public readonly createdAt!: Date;
   public readonly updatedAt!: Date;
 
@@ -67,6 +74,10 @@ User.init(
       allowNull: true,
     },
     refreshTokenId: {
+      type: DataTypes.STRING(255),
+      allowNull: true,
+    },
+    extensionRefreshTokenId: {
       type: DataTypes.STRING(255),
       allowNull: true,
     },

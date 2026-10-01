@@ -1,4 +1,5 @@
 import User from "../models/User";
+import CompanyService from "./CompanyService";
 import { Op } from "sequelize";
 import jwt from "jsonwebtoken";
 import crypto from "crypto";
@@ -39,6 +40,8 @@ class AuthService {
       password: data.password,
       fullName: data.fullName,
     });
+
+    await CompanyService.claimInvites(user.id, user.email);
 
     return user;
   }
@@ -112,6 +115,40 @@ class AuthService {
     };
   }
 
+  static async issueExtensionSession(user: User) {
+    const extensionRefreshTokenId = crypto.randomBytes(32).toString("hex");
+    await user.update({ extensionRefreshTokenId });
+
+    return {
+      accessToken: this.signAccessToken(user.id),
+      refreshToken: this.signRefreshToken(user.id, extensionRefreshTokenId),
+    };
+  }
+
+  static async rotateExtensionSession(refreshToken?: string) {
+    const payload = this.readRefreshPayload(refreshToken);
+    const user = await User.findByPk(payload.userId);
+    if (!user || user.extensionRefreshTokenId !== payload.jti) {
+      throw new Error("Invalid refresh token");
+    }
+
+    return this.issueExtensionSession(user);
+  }
+
+  static async revokeExtensionSession(refreshToken?: string) {
+    if (!refreshToken) return;
+
+    try {
+      const payload = this.readRefreshPayload(refreshToken);
+      const user = await User.findByPk(payload.userId);
+      if (user && user.extensionRefreshTokenId === payload.jti) {
+        await user.update({ extensionRefreshTokenId: null });
+      }
+    } catch {
+      return;
+    }
+  }
+
   static async revokeSession(refreshToken?: string) {
     if (!refreshToken) return;
 
@@ -125,6 +162,29 @@ class AuthService {
     } catch {
       return;
     }
+  }
+
+  private static readRefreshPayload(refreshToken?: string) {
+    if (!refreshToken) {
+      throw new Error("Invalid refresh token");
+    }
+
+    let payload: jwt.JwtPayload;
+    try {
+      const decoded = jwt.verify(refreshToken, EnvVars.Jwt.Secret);
+      if (typeof decoded === "string") {
+        throw new Error("Invalid refresh token");
+      }
+      payload = decoded;
+    } catch {
+      throw new Error("Invalid refresh token");
+    }
+
+    if (payload.type !== "refresh" || !payload.userId || !payload.jti) {
+      throw new Error("Invalid refresh token");
+    }
+
+    return payload;
   }
 
   private static signAccessToken(userId: number) {

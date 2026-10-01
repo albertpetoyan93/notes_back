@@ -1,6 +1,8 @@
 import { Op } from "sequelize";
 import Collection from "../models/Collection";
 import CollectionShare from "../models/CollectionShare";
+import Company from "../models/Company";
+import CompanyMember from "../models/CompanyMember";
 import Note from "../models/Note";
 import User from "../models/User";
 import { SharePermission } from "../models/NoteShare";
@@ -17,6 +19,27 @@ class CollectionService {
   async getAccess(collectionId: number, userId: number) {
     const collection = await Collection.findByPk(collectionId);
     if (!collection) return null;
+    if (collection.companyId) {
+      const company = await Company.findByPk(collection.companyId);
+      if (!company || company.status !== "active") return null;
+      const member = await CompanyMember.findOne({
+        where: {
+          companyId: collection.companyId,
+          userId,
+          status: "active",
+        },
+      });
+      if (!member) return null;
+      if (member.role !== "member") {
+        return { collection, permission: "owner" as const };
+      }
+      const share = await CollectionShare.findOne({
+        where: this.activeShareFilter({ collectionId, sharedWithUserId: userId }),
+      });
+      const permission = this.memberPermission(collection.companyShare, share?.permission);
+      if (!permission) return null;
+      return { collection, permission };
+    }
     if (collection.userId === userId) {
       return { collection, permission: "owner" as const };
     }
@@ -42,6 +65,7 @@ class CollectionService {
 
     const collections = await Collection.findAll({
       where: {
+        companyId: { [Op.is]: null },
         [Op.or]: [
           { userId },
           ...(permissionById.size
@@ -84,7 +108,7 @@ class CollectionService {
     }
 
     const existing = await Collection.findOne({
-      where: { userId, name: trimmed },
+      where: { userId, name: trimmed, companyId: { [Op.is]: null } },
     });
     if (existing) {
       throw Object.assign(
@@ -96,6 +120,7 @@ class CollectionService {
     const collection = await Collection.create({
       userId,
       name: trimmed.slice(0, 100),
+      companyId: null,
     });
     return {
       id: collection.id,
@@ -104,6 +129,235 @@ class CollectionService {
       permission: "owner" as const,
       noteCount: 0,
     };
+  }
+
+  async listForCompany(companyId: number, userId: number) {
+    const access = await this.companyMember(companyId, userId);
+    if (!access) {
+      throw Object.assign(new Error("Company not found"), { status: 404 });
+    }
+    const collections = await Collection.findAll({
+      where: { companyId },
+      order: [["name", "ASC"]],
+    });
+    const ids = collections.map((collection) => collection.id);
+    const shareRows = ids.length
+      ? await CollectionShare.findAll({
+          where: this.activeShareFilter({
+            collectionId: { [Op.in]: ids },
+            ...(access.role === "member" ? { sharedWithUserId: userId } : {}),
+          }),
+          include:
+            access.role === "member"
+              ? []
+              : [
+                  {
+                    model: User,
+                    as: "sharedWith",
+                    attributes: ["id", "email", "fullName", "username"],
+                  },
+                ],
+        })
+      : [];
+    const directByCollection = new Map<number, SharePermission>();
+    const peopleByCollection = new Map<
+      number,
+      { userId: number; email: string; name: string; permission: SharePermission }[]
+    >();
+    for (const share of shareRows) {
+      if (access.role === "member") {
+        const current = directByCollection.get(share.collectionId);
+        if (current !== "edit") directByCollection.set(share.collectionId, share.permission);
+        continue;
+      }
+      const person = share.get("sharedWith") as User | undefined;
+      const list = peopleByCollection.get(share.collectionId) || [];
+      list.push({
+        userId: share.sharedWithUserId,
+        email: person?.email || "",
+        name: person?.fullName || person?.username || person?.email || "",
+        permission: share.permission,
+      });
+      peopleByCollection.set(share.collectionId, list);
+    }
+    const counts = ids.length
+      ? ((await Note.count({
+          where: { collectionId: { [Op.in]: ids } },
+          group: ["collectionId"],
+        })) as unknown as { collectionId: number; count: string }[])
+      : [];
+    const countById = new Map<number, number>(
+      counts.map((row) => [Number(row.collectionId), Number(row.count)])
+    );
+    const visible =
+      access.role === "member"
+        ? collections.filter(
+            (collection) =>
+              collection.companyShare === "view" ||
+              collection.companyShare === "edit" ||
+              directByCollection.has(collection.id)
+          )
+        : collections;
+    return visible.map((collection) => {
+      const companyShare =
+        collection.companyShare === "view" || collection.companyShare === "edit"
+          ? collection.companyShare
+          : null;
+      const permission =
+        access.role === "member"
+          ? this.memberPermission(companyShare, directByCollection.get(collection.id)) || "view"
+          : ("owner" as const);
+      return {
+        id: collection.id,
+        name: collection.name,
+        noteCount: countById.get(collection.id) || 0,
+        permission,
+        companyShare,
+        shares: access.role === "member" ? [] : peopleByCollection.get(collection.id) || [],
+      };
+    });
+  }
+
+  async shareCompanyCollection(
+    companyId: number,
+    collectionId: number,
+    userId: number,
+    audience: string,
+    permission: string,
+    emails: string[] = []
+  ) {
+    const manager = await this.companyMember(companyId, userId);
+    if (!manager || manager.role === "member") {
+      throw Object.assign(new Error("You cannot share collections here"), { status: 403 });
+    }
+    const collection = await Collection.findOne({ where: { id: collectionId, companyId } });
+    if (!collection) {
+      throw Object.assign(new Error("Collection not found"), { status: 404 });
+    }
+    const nextPermission: SharePermission = permission === "edit" ? "edit" : "view";
+    if (audience === "all") {
+      await collection.update({ companyShare: nextPermission });
+      return { shared: [], failed: [] as { email: string; message: string }[] };
+    }
+    const list = [...new Set(emails.map((item) => item.trim().toLowerCase()).filter(Boolean))];
+    if (!list.length) {
+      throw Object.assign(new Error("Choose at least one person"), { status: 400 });
+    }
+    const shared: { email: string }[] = [];
+    const failed: { email: string; message: string }[] = [];
+    for (const normalized of list) {
+      try {
+        const recipient = await User.findOne({
+          where: { email: { [Op.iLike]: normalized } },
+          attributes: ["id", "email"],
+        });
+        if (!recipient) {
+          throw Object.assign(new Error("That person is not in this company"), { status: 400 });
+        }
+        const member = await CompanyMember.findOne({
+          where: { companyId, userId: recipient.id, status: "active" },
+        });
+        if (!member) {
+          throw Object.assign(new Error("That person is not in this company"), { status: 400 });
+        }
+        const existing = await CollectionShare.findOne({
+          where: { collectionId, sharedWithUserId: recipient.id },
+        });
+        if (existing) {
+          await existing.update({
+            permission: nextPermission,
+            expiresAt: null,
+            sharedByUserId: userId,
+          });
+        } else {
+          await CollectionShare.create({
+            collectionId,
+            sharedByUserId: userId,
+            sharedWithUserId: recipient.id,
+            permission: nextPermission,
+            expiresAt: null,
+          });
+        }
+        shared.push({ email: recipient.email });
+      } catch (error: any) {
+        failed.push({
+          email: normalized,
+          message: error?.message || "Could not share",
+        });
+      }
+    }
+    return { shared, failed };
+  }
+
+  async unshareCompanyCollection(
+    companyId: number,
+    collectionId: number,
+    userId: number,
+    target: { all?: boolean; memberUserId?: number }
+  ) {
+    const manager = await this.companyMember(companyId, userId);
+    if (!manager || manager.role === "member") {
+      throw Object.assign(new Error("You cannot share collections here"), { status: 403 });
+    }
+    const collection = await Collection.findOne({ where: { id: collectionId, companyId } });
+    if (!collection) {
+      throw Object.assign(new Error("Collection not found"), { status: 404 });
+    }
+    if (target.all) {
+      await collection.update({ companyShare: null });
+      return { companyShare: null };
+    }
+    if (!target.memberUserId) {
+      throw Object.assign(new Error("Choose a person to remove"), { status: 400 });
+    }
+    await CollectionShare.destroy({
+      where: { collectionId, sharedWithUserId: target.memberUserId },
+    });
+    return { removed: target.memberUserId };
+  }
+
+  async createForCompany(companyId: number, userId: number, name: string) {
+    const access = await this.companyMember(companyId, userId);
+    if (!access || access.role === "member") {
+      throw Object.assign(new Error("You cannot create collections here"), { status: 403 });
+    }
+    const trimmed = name.trim().replace(/\s+/g, " ").slice(0, 100);
+    if (!trimmed) {
+      throw Object.assign(new Error("Collection name is required"), { status: 400 });
+    }
+    const existing = await Collection.findOne({ where: { companyId, name: trimmed } });
+    if (existing) {
+      throw Object.assign(new Error(`This company already has a collection named "${trimmed}"`), {
+        status: 400,
+      });
+    }
+    const collection = await Collection.create({
+      userId,
+      companyId,
+      name: trimmed,
+    });
+    return { id: collection.id, name: collection.name, noteCount: 0, permission: "owner" as const };
+  }
+
+  private memberPermission(
+    companyShare?: string | null,
+    direct?: SharePermission | null
+  ): SharePermission | null {
+    const allowed = (value?: string | null): SharePermission | null =>
+      value === "edit" || value === "view" ? value : null;
+    const everyone = allowed(companyShare);
+    const person = allowed(direct);
+    if (everyone === "edit" || person === "edit") return "edit";
+    if (everyone || person) return "view";
+    return null;
+  }
+
+  private async companyMember(companyId: number, userId: number) {
+    const company = await Company.findByPk(companyId);
+    if (!company || company.status !== "active") return null;
+    return CompanyMember.findOne({
+      where: { companyId, userId, status: "active" },
+    });
   }
 
   async rename(collectionId: number, userId: number, name: string) {
@@ -119,9 +373,11 @@ class CollectionService {
 
     const duplicate = await Collection.findOne({
       where: {
-        userId,
         name: trimmed.slice(0, 100),
         id: { [Op.ne]: collectionId },
+        ...(access.collection.companyId
+          ? { companyId: access.collection.companyId }
+          : { userId, companyId: { [Op.is]: null } }),
       },
     });
     if (duplicate) {
@@ -273,6 +529,21 @@ class CollectionService {
         new Error("You cannot share a collection with yourself"),
         { status: 400 }
       );
+    }
+    if (collection.companyId) {
+      const member = await CompanyMember.findOne({
+        where: {
+          companyId: collection.companyId,
+          userId: recipient.id,
+          status: "active",
+        },
+      });
+      if (!member) {
+        throw Object.assign(
+          new Error("Company notes can only be shared with people in this company"),
+          { status: 400 }
+        );
+      }
     }
     if (permission !== "view" && permission !== "edit") {
       throw Object.assign(new Error("Permission must be view or edit"), {

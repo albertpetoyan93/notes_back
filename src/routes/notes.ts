@@ -16,6 +16,7 @@ router.get("/stats", NoteController.getNoteStats as RequestHandler);
 // Get all projects
 router.get("/projects", NoteController.getProjects as RequestHandler);
 
+router.get("/autofill", NoteController.autofill as RequestHandler);
 router.get("/export", NoteController.exportNotes as RequestHandler);
 router.post("/import", NoteController.importNotes as RequestHandler);
 router.delete("/trash", NoteController.emptyTrash as RequestHandler);

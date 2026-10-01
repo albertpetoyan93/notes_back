@@ -13,7 +13,12 @@ const isAuth: RequestHandler = async (
     return next();
   }
   try {
-    const token = req.cookies?.access_token as string | undefined;
+    const header = req.headers.authorization;
+    const bearer =
+      typeof header === "string" && header.startsWith("Bearer ")
+        ? header.slice("Bearer ".length).trim()
+        : undefined;
+    const token = (req.cookies?.access_token as string | undefined) || bearer;
 
     if (!token) {
       throw new CustomError("Unauthorized", HttpStatusCodes.UNAUTHORIZED);
