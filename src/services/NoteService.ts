@@ -26,7 +26,16 @@ interface NoteFilters {
 interface CreateNoteData {
   title: string;
   content: any;
-  category: "note" | "password" | "login" | "command" | "ssh" | "db" | "other";
+  category:
+    | "note"
+    | "password"
+    | "login"
+    | "command"
+    | "ssh"
+    | "db"
+    | "address"
+    | "card"
+    | "other";
   project?: string;
   tags?: string[];
   isFavorite?: boolean;
@@ -38,7 +47,16 @@ interface CreateNoteData {
 interface UpdateNoteData {
   title?: string;
   content?: any;
-  category?: "note" | "password" | "login" | "command" | "ssh" | "db" | "other";
+  category?:
+    | "note"
+    | "password"
+    | "login"
+    | "command"
+    | "ssh"
+    | "db"
+    | "address"
+    | "card"
+    | "other";
   project?: string;
   tags?: string[];
   isFavorite?: boolean;
@@ -501,6 +519,8 @@ class NoteService {
       "command",
       "ssh",
       "db",
+      "address",
+      "card",
       "other",
     ] as const;
     let imported = 0;

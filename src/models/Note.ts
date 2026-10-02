@@ -7,7 +7,16 @@ interface NoteAttributes {
   title: string;
   content: Record<string, any>; // JSONB object for flexible key-value storage
   comment?: string;
-  category: "note" | "password" | "login" | "command" | "ssh" | "db" | "other";
+  category:
+    | "note"
+    | "password"
+    | "login"
+    | "command"
+    | "ssh"
+    | "db"
+    | "address"
+    | "card"
+    | "other";
   project?: string | null;
   tags?: string[];
   isEncrypted: boolean;
@@ -47,6 +56,8 @@ class Note
     | "command"
     | "ssh"
     | "db"
+    | "address"
+    | "card"
     | "other";
   public project?: string | null;
   public tags?: string[];
@@ -87,6 +98,8 @@ Note.init(
         "command",
         "ssh",
         "db",
+        "address",
+        "card",
         "other"
       ),
       allowNull: false,
@@ -128,7 +141,12 @@ Note.init(
     hooks: {
       // Auto-enable encryption for password and login categories
       beforeValidate: async (note: Note) => {
-        if (note.category === "password" || note.category === "login") {
+        if (
+          note.category === "password" ||
+          note.category === "login" ||
+          note.category === "address" ||
+          note.category === "card"
+        ) {
           note.isEncrypted = true;
         }
       },
