@@ -102,6 +102,7 @@ export default class NoteController {
         isFavorite,
         isEncrypted,
         collectionId,
+        collectionIds,
       } = req.body;
 
       const note = await NoteService.createNote(userId, {
@@ -113,6 +114,7 @@ export default class NoteController {
         isFavorite,
         isEncrypted,
         collectionId,
+        collectionIds,
       });
 
       res.status(201).json(note);
@@ -198,6 +200,7 @@ export default class NoteController {
         isFavorite,
         isEncrypted,
         collectionId,
+        collectionIds,
       } = req.body;
 
       const note = await NoteService.updateNote(noteId, userId, {
@@ -209,6 +212,7 @@ export default class NoteController {
         isFavorite,
         isEncrypted,
         collectionId,
+        collectionIds,
       });
 
       if (!note) {

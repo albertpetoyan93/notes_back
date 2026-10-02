@@ -1,9 +1,14 @@
 import User from "../models/User";
 import CompanyService from "./CompanyService";
+import EmailService from "./EmailService";
+import logger from "jet-logger";
 import { Op } from "sequelize";
 import jwt from "jsonwebtoken";
 import crypto from "crypto";
 import EnvVars from "../common/EnvVars";
+
+const RESET_MESSAGE =
+  "If an account exists for that email, we sent a reset link.";
 
 interface RegisterData {
   username: string;
@@ -147,6 +152,79 @@ class AuthService {
     } catch {
       return;
     }
+  }
+
+  static async requestPasswordReset(email: string) {
+    const normalized = String(email || "").trim().toLowerCase();
+    if (!normalized) return RESET_MESSAGE;
+
+    const user = await User.findOne({
+      where: { email: { [Op.iLike]: normalized } },
+    });
+    if (!user) return RESET_MESSAGE;
+
+    const token = crypto.randomBytes(32).toString("hex");
+    const passwordResetTokenHash = crypto
+      .createHash("sha256")
+      .update(token)
+      .digest("hex");
+    const passwordResetExpires = new Date(Date.now() + 60 * 60 * 1000);
+    await user.update({ passwordResetTokenHash, passwordResetExpires });
+
+    if (!EmailService.isConfigured()) {
+      const origin = EnvVars.FrontendOrigin || "http://localhost:5173";
+      logger.info(
+        `Password reset link for ${user.email}: ${origin}/auth/reset?token=${token}`
+      );
+      return RESET_MESSAGE;
+    }
+
+    try {
+      await EmailService.sendPasswordReset({ to: user.email, token });
+    } catch (error) {
+      logger.err(error, true);
+    }
+    return RESET_MESSAGE;
+  }
+
+  static async resetPassword(token: string, password: string) {
+    if (String(password || "").length < 6) {
+      throw new Error("Password must be at least 6 characters.");
+    }
+
+    const raw = String(token || "").trim();
+    if (!raw) {
+      throw new Error("This reset link is invalid or has expired.");
+    }
+
+    const passwordResetTokenHash = crypto
+      .createHash("sha256")
+      .update(raw)
+      .digest("hex");
+    const user = await User.findOne({ where: { passwordResetTokenHash } });
+    const expires = user?.passwordResetExpires
+      ? new Date(user.passwordResetExpires).getTime()
+      : 0;
+    if (!user || !user.passwordResetTokenHash || expires < Date.now()) {
+      throw new Error("This reset link is invalid or has expired.");
+    }
+
+    const stored = Buffer.from(user.passwordResetTokenHash);
+    const given = Buffer.from(passwordResetTokenHash);
+    if (
+      stored.length !== given.length ||
+      !crypto.timingSafeEqual(stored, given)
+    ) {
+      throw new Error("This reset link is invalid or has expired.");
+    }
+
+    await user.update({
+      password,
+      passwordResetTokenHash: null,
+      passwordResetExpires: null,
+      refreshTokenId: null,
+      extensionRefreshTokenId: null,
+    });
   }
 
   static async revokeSession(refreshToken?: string) {

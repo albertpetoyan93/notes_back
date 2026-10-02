@@ -23,6 +23,8 @@ router.post(
 router.post("/extension/refresh", AuthController.extensionRefresh);
 router.post("/extension/logout", AuthController.extensionLogout);
 router.post("/register", authLimiter, AuthController.register);
+router.post("/forgot-password", authLimiter, AuthController.forgotPassword);
+router.post("/reset-password", authLimiter, AuthController.resetPassword);
 router.post("/refresh", AuthController.refresh);
 router.post("/logout", AuthController.logout);
 router.get("/me", isAuth, AuthController.me as any);

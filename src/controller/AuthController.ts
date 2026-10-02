@@ -150,6 +150,41 @@ export default class AuthController {
     res.status(HttpStatusCodes.OK).send({ ok: true });
   };
 
+  static forgotPassword = async (
+    req: Request,
+    res: Response,
+    next: NextFunction
+  ) => {
+    try {
+      const message = await AuthService.requestPasswordReset(req.body?.email);
+      res.status(HttpStatusCodes.OK).send({ message });
+    } catch (e) {
+      next(e);
+    }
+  };
+
+  static resetPassword = async (
+    req: Request,
+    res: Response,
+    next: NextFunction
+  ) => {
+    try {
+      await AuthService.resetPassword(req.body?.token, req.body?.password);
+      res.status(HttpStatusCodes.OK).send({
+        message: "Password updated. Sign in with the new password.",
+      });
+    } catch (e: any) {
+      if (
+        e.message === "This reset link is invalid or has expired." ||
+        e.message === "Password must be at least 6 characters."
+      ) {
+        res.status(HttpStatusCodes.BAD_REQUEST).send({ message: e.message });
+      } else {
+        next(e);
+      }
+    }
+  };
+
   static refresh = async (req: Request, res: Response) => {
     try {
       const session = await AuthService.rotateSession(

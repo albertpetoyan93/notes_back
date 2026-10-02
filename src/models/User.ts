@@ -10,6 +10,8 @@ interface UserAttributes {
   fullName?: string;
   refreshTokenId?: string | null;
   extensionRefreshTokenId?: string | null;
+  passwordResetTokenHash?: string | null;
+  passwordResetExpires?: Date | null;
   createdAt?: Date;
   updatedAt?: Date;
 }
@@ -21,6 +23,8 @@ interface UserCreationAttributes
     | "fullName"
     | "refreshTokenId"
     | "extensionRefreshTokenId"
+    | "passwordResetTokenHash"
+    | "passwordResetExpires"
     | "createdAt"
     | "updatedAt"
   > {}
@@ -36,6 +40,8 @@ class User
   public fullName?: string;
   public refreshTokenId?: string | null;
   public extensionRefreshTokenId?: string | null;
+  public passwordResetTokenHash?: string | null;
+  public passwordResetExpires?: Date | null;
   public readonly createdAt!: Date;
   public readonly updatedAt!: Date;
 
@@ -79,6 +85,14 @@ User.init(
     },
     extensionRefreshTokenId: {
       type: DataTypes.STRING(255),
+      allowNull: true,
+    },
+    passwordResetTokenHash: {
+      type: DataTypes.STRING(64),
+      allowNull: true,
+    },
+    passwordResetExpires: {
+      type: DataTypes.DATE,
       allowNull: true,
     },
   },

@@ -107,6 +107,29 @@ class EmailService {
 </div>`;
     return this.deliver(input.to, subject, text, html);
   }
+
+  async sendPasswordReset(input: { to: string; token: string }) {
+    const origin = EnvVars.FrontendOrigin || "http://localhost:5173";
+    const link = `${origin}/auth/reset?token=${encodeURIComponent(input.token)}`;
+    const subject = "Reset your Keevo password";
+    const text = [
+      "We received a request to reset your Keevo password.",
+      "",
+      "Click below to choose a new password. This link expires in 1 hour.",
+      "",
+      link,
+      "",
+      "If you did not ask for this, you can ignore this email.",
+    ].join("\n");
+    const safeLink = escapeHtml(link);
+    const html = `<div style="font-family:Segoe UI,sans-serif;color:#1f2937;line-height:1.5;">
+<p style="margin:0 0 16px;">We received a request to reset your Keevo password.</p>
+<p style="margin:0 0 16px;">Click below to choose a new password. This link expires in 1 hour.</p>
+<p style="margin:0 0 20px;"><a href="${safeLink}" style="display:inline-block;background:#6d5efc;color:#ffffff;text-decoration:none;padding:10px 16px;border-radius:8px;">Reset password</a></p>
+<p style="margin:0;color:#6b7280;font-size:13px;">If you did not ask for this, you can ignore this email.</p>
+</div>`;
+    return this.deliver(input.to, subject, text, html);
+  }
 }
 
 export default new EmailService();

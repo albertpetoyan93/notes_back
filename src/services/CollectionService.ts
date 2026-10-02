@@ -1,5 +1,6 @@
 import { Op } from "sequelize";
 import Collection from "../models/Collection";
+import CollectionNote from "../models/CollectionNote";
 import CollectionShare from "../models/CollectionShare";
 import Company from "../models/Company";
 import CompanyMember from "../models/CompanyMember";
@@ -77,15 +78,7 @@ class CollectionService {
     });
 
     const ids = collections.map((collection) => collection.id);
-    const counts = ids.length
-      ? ((await Note.count({
-          where: { collectionId: { [Op.in]: ids } },
-          group: ["collectionId"],
-        })) as unknown as { collectionId: number; count: string }[])
-      : [];
-    const countById = new Map<number, number>(
-      counts.map((row) => [Number(row.collectionId), Number(row.count)])
-    );
+    const countById = await this.noteCounts(ids);
 
     return collections.map((collection) => ({
       id: collection.id,
@@ -180,15 +173,7 @@ class CollectionService {
       });
       peopleByCollection.set(share.collectionId, list);
     }
-    const counts = ids.length
-      ? ((await Note.count({
-          where: { collectionId: { [Op.in]: ids } },
-          group: ["collectionId"],
-        })) as unknown as { collectionId: number; count: string }[])
-      : [];
-    const countById = new Map<number, number>(
-      counts.map((row) => [Number(row.collectionId), Number(row.count)])
-    );
+    const countById = await this.noteCounts(ids);
     const visible =
       access.role === "member"
         ? collections.filter(
@@ -352,6 +337,70 @@ class CollectionService {
     return null;
   }
 
+  async activeCompanyIds(userId: number) {
+    const memberships = await CompanyMember.findAll({
+      where: { userId, status: "active" },
+      attributes: ["companyId"],
+    });
+    const ids = memberships.map((member) => member.companyId);
+    if (!ids.length) return new Set<number>();
+    const companies = await Company.findAll({
+      where: { id: { [Op.in]: ids }, status: "active" },
+      attributes: ["id"],
+    });
+    return new Set(companies.map((company) => company.id));
+  }
+
+  /** Collections this user can open in an active company while their membership is active. */
+  async openCompanyCollections(userId: number) {
+    const memberships = await CompanyMember.findAll({
+      where: { userId, status: "active" },
+      attributes: ["companyId", "role"],
+    });
+    const result = new Map<number, "owner" | SharePermission>();
+    if (!memberships.length) return result;
+
+    const companies = await Company.findAll({
+      where: {
+        id: { [Op.in]: memberships.map((member) => member.companyId) },
+        status: "active",
+      },
+      attributes: ["id"],
+    });
+    const activeIds = new Set(companies.map((company) => company.id));
+
+    for (const member of memberships) {
+      if (!activeIds.has(member.companyId)) continue;
+      const collections = await Collection.findAll({
+        where: { companyId: member.companyId },
+        attributes: ["id", "companyShare"],
+      });
+      if (!collections.length) continue;
+      if (member.role !== "member") {
+        collections.forEach((collection) => result.set(collection.id, "owner"));
+        continue;
+      }
+      const shares = await CollectionShare.findAll({
+        where: this.activeShareFilter({
+          collectionId: { [Op.in]: collections.map((collection) => collection.id) },
+          sharedWithUserId: userId,
+        }),
+        attributes: ["collectionId", "permission"],
+      });
+      const direct = new Map(
+        shares.map((share) => [share.collectionId, share.permission])
+      );
+      for (const collection of collections) {
+        const permission = this.memberPermission(
+          collection.companyShare,
+          direct.get(collection.id)
+        );
+        if (permission) result.set(collection.id, permission);
+      }
+    }
+    return result;
+  }
+
   private async companyMember(companyId: number, userId: number) {
     const company = await Company.findByPk(companyId);
     if (!company || company.status !== "active") return null;
@@ -398,10 +447,19 @@ class CollectionService {
   async remove(collectionId: number, userId: number) {
     const access = await this.getAccess(collectionId, userId);
     if (!access || access.permission !== "owner") return false;
+    const links = await CollectionNote.findAll({
+      where: { collectionId },
+      attributes: ["noteId"],
+    });
+    const noteIds = links.map((link) => link.noteId);
+    await CollectionNote.destroy({ where: { collectionId } });
     await Note.update(
       { collectionId: null, project: null },
       { where: { collectionId } }
     );
+    for (const noteId of noteIds) {
+      await this.restorePrimaryCollection(noteId);
+    }
     await access.collection.destroy();
     return true;
   }
@@ -438,41 +496,161 @@ class CollectionService {
       });
     }
 
-    await Note.update(
-      { collectionId, project: access.collection.name },
-      { where: { id: { [Op.in]: notes.map((note) => note.id) } } }
-    );
+    for (const note of notes) {
+      await this.addNoteToCollection(note.id, collectionId, access.collection.name);
+    }
 
     return { added: notes.length, skipped: ids.length - notes.length };
   }
 
   async removeNote(collectionId: number, userId: number, noteId: number) {
     const access = await this.getAccess(collectionId, userId);
-    const note = await Note.findOne({ where: { id: noteId, collectionId } });
-    if (!note || !access) return false;
+    const note = await Note.findByPk(noteId);
+    const linked = await CollectionNote.findOne({
+      where: { collectionId, noteId },
+    });
+    const inCollection = Boolean(linked) || note?.collectionId === collectionId;
+    if (!note || !access || !inCollection) return false;
 
     const canRemove =
       access.permission === "owner" || note.userId === userId;
     if (!canRemove) return false;
 
-    await note.update({ collectionId: null, project: null });
+    await CollectionNote.destroy({ where: { collectionId, noteId } });
+    if (note.collectionId === collectionId) {
+      await note.update({ collectionId: null, project: null });
+      await this.restorePrimaryCollection(noteId);
+    }
     return true;
   }
 
   async availableNotes(collectionId: number, userId: number) {
     await this.assertCanAdd(collectionId, userId);
+    const linkedIds = await this.noteIdsForCollections([collectionId]);
     const notes = await Note.findAll({
       where: {
         userId,
-        [Op.or]: [
-          { collectionId: null },
-          { collectionId: { [Op.ne]: collectionId } },
-        ],
+        ...(linkedIds.length ? { id: { [Op.notIn]: linkedIds } } : {}),
       },
       attributes: ["id", "title", "collectionId"],
       order: [["title", "ASC"]],
     });
     return notes;
+  }
+
+  async noteIdsForCollections(collectionIds: number[]) {
+    const links = await this.linksForCollections(collectionIds);
+    return [...new Set(links.map((link) => link.noteId))];
+  }
+
+  async linksForCollections(collectionIds: number[]) {
+    const ids = [...new Set(collectionIds.filter((id) => Number.isInteger(id)))];
+    if (!ids.length) return [] as { noteId: number; collectionId: number }[];
+    const links = await CollectionNote.findAll({
+      where: { collectionId: { [Op.in]: ids } },
+      attributes: ["noteId", "collectionId"],
+    });
+    const legacy = await Note.findAll({
+      where: { collectionId: { [Op.in]: ids } },
+      attributes: ["id", "collectionId"],
+    });
+    const seen = new Set(links.map((link) => `${link.collectionId}:${link.noteId}`));
+    const rows = links.map((link) => ({
+      noteId: link.noteId,
+      collectionId: link.collectionId,
+    }));
+    for (const note of legacy) {
+      if (!note.collectionId) continue;
+      const key = `${note.collectionId}:${note.id}`;
+      if (seen.has(key)) continue;
+      rows.push({ noteId: note.id, collectionId: note.collectionId });
+    }
+    return rows;
+  }
+
+  async collectionsByNoteId(noteIds: number[]) {
+    const ids = [...new Set(noteIds.filter((id) => Number.isInteger(id)))];
+    const map = new Map<
+      number,
+      { id: number; name: string; companyId: number | null }[]
+    >();
+    if (!ids.length) return map;
+
+    const links = await CollectionNote.findAll({
+      where: { noteId: { [Op.in]: ids } },
+      include: [
+        {
+          model: Collection,
+          as: "collection",
+          attributes: ["id", "name", "companyId"],
+        },
+      ],
+    });
+    for (const link of links) {
+      const collection = link.get("collection") as Collection | undefined;
+      if (!collection) continue;
+      const list = map.get(link.noteId) || [];
+      if (!list.some((item) => item.id === collection.id)) {
+        list.push({
+          id: collection.id,
+          name: collection.name,
+          companyId: collection.companyId ?? null,
+        });
+      }
+      map.set(link.noteId, list);
+    }
+
+    const missing = ids.filter((id) => !map.has(id));
+    if (missing.length) {
+      const notes = await Note.findAll({
+        where: { id: { [Op.in]: missing }, collectionId: { [Op.not]: null } },
+        include: [
+          {
+            model: Collection,
+            as: "collection",
+            attributes: ["id", "name", "companyId"],
+          },
+        ],
+      });
+      for (const note of notes) {
+        const collection = (note as Note & { collection?: Collection }).collection;
+        if (!collection || !note.collectionId) continue;
+        map.set(note.id, [
+          {
+            id: collection.id,
+            name: collection.name,
+            companyId: collection.companyId ?? null,
+          },
+        ]);
+      }
+    }
+    return map;
+  }
+
+  async setNoteCollections(noteId: number, collectionIds: number[]) {
+    const ids = [...new Set(collectionIds.filter((id) => Number.isInteger(id)))];
+    await CollectionNote.destroy({ where: { noteId } });
+    if (ids.length) {
+      await CollectionNote.bulkCreate(
+        ids.map((collectionId) => ({ collectionId, noteId }))
+      );
+    }
+    await Note.update(
+      { collectionId: null, project: null },
+      { where: { id: noteId } }
+    );
+    await this.restorePrimaryCollection(noteId);
+  }
+
+  async addNoteToCollection(noteId: number, collectionId: number, name: string) {
+    await CollectionNote.findOrCreate({
+      where: { noteId, collectionId },
+      defaults: { noteId, collectionId },
+    });
+    const note = await Note.findByPk(noteId);
+    if (note && !note.collectionId) {
+      await note.update({ collectionId, project: name });
+    }
   }
 
   async listShares(collectionId: number, userId: number) {
@@ -624,6 +802,40 @@ class CollectionService {
       where: { collectionId, sharedWithUserId },
     });
     return deleted > 0;
+  }
+
+  private async noteCounts(collectionIds: number[]) {
+    const links = await this.linksForCollections(collectionIds);
+    const map = new Map<number, Set<number>>();
+    for (const link of links) {
+      const set = map.get(link.collectionId) || new Set<number>();
+      set.add(link.noteId);
+      map.set(link.collectionId, set);
+    }
+    return new Map([...map.entries()].map(([id, set]) => [id, set.size]));
+  }
+
+  private async restorePrimaryCollection(noteId: number) {
+    const links = await CollectionNote.findAll({
+      where: { noteId },
+      include: [
+        {
+          model: Collection,
+          as: "collection",
+          attributes: ["id", "name", "companyId"],
+        },
+      ],
+    });
+    const collections = links
+      .map((link) => link.get("collection") as Collection | undefined)
+      .filter((collection): collection is Collection => Boolean(collection));
+    const primary =
+      collections.find((collection) => !collection.companyId) || collections[0];
+    if (!primary) return;
+    await Note.update(
+      { collectionId: primary.id, project: primary.name },
+      { where: { id: noteId, collectionId: { [Op.is]: null } } }
+    );
   }
 }
 

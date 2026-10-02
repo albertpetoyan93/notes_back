@@ -271,11 +271,7 @@ class CompanyService {
     if (actor.role === "admin" && member.role !== "member") {
       throw Object.assign(new Error("Only the owner can remove an admin"), { status: 403 });
     }
-    if (member.status === "invited") {
-      await member.destroy();
-      return { ok: true };
-    }
-    await member.update({ status: "removed", expiresAt: null });
+    await member.destroy();
     return { ok: true };
   }
 

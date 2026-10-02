@@ -11,6 +11,7 @@ import Note from "./Note";
 import NoteShare from "./NoteShare";
 import NoteFavorite from "./NoteFavorite";
 import Collection from "./Collection";
+import CollectionNote from "./CollectionNote";
 import CollectionShare from "./CollectionShare";
 import Company from "./Company";
 import CompanyMember from "./CompanyMember";
@@ -131,6 +132,34 @@ function setupAssociations() {
     foreignKey: "collectionId",
     onUpdate: "cascade",
     onDelete: "set null",
+  });
+
+  CollectionNote.belongsTo(Collection, {
+    as: "collection",
+    foreignKey: "collectionId",
+    onUpdate: "cascade",
+    onDelete: "cascade",
+  });
+
+  CollectionNote.belongsTo(Note, {
+    as: "note",
+    foreignKey: "noteId",
+    onUpdate: "cascade",
+    onDelete: "cascade",
+  });
+
+  Collection.hasMany(CollectionNote, {
+    as: "noteLinks",
+    foreignKey: "collectionId",
+    onUpdate: "cascade",
+    onDelete: "cascade",
+  });
+
+  Note.hasMany(CollectionNote, {
+    as: "collectionLinks",
+    foreignKey: "noteId",
+    onUpdate: "cascade",
+    onDelete: "cascade",
   });
 
   Collection.hasMany(CollectionShare, {
