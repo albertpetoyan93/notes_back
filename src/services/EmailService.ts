@@ -63,23 +63,23 @@ class EmailService {
     const origin = EnvVars.FrontendOrigin || "http://localhost:5173";
     const link = `${origin}/company/${input.companyId}`;
     const companyName = input.companyName || "A Company";
-    const subject = `Invitation to join ${companyName} on Keevo`;
+    const subject = `Invitation to join ${companyName} on 2keevo`;
     const text = [
-      `You have been invited to join ${companyName} on Keevo.`,
+      `You have been invited to join ${companyName} on 2keevo.`,
       "",
       "Click below to accept the invitation and access your workspace.",
       "",
       link,
       "",
-      "Note: This invitation will expire in 14 days. If you don't have a Keevo account yet, please sign up using this email address first.",
+      "Note: This invitation will expire in 14 days. If you don't have a 2keevo account yet, please sign up using this email address first.",
     ].join("\n");
     const safeName = escapeHtml(companyName);
     const safeLink = escapeHtml(link);
     const html = `<div style="font-family:Segoe UI,sans-serif;color:#1f2937;line-height:1.5;">
-<p style="margin:0 0 16px;">You have been invited to join <strong>${safeName}</strong> on Keevo.</p>
+<p style="margin:0 0 16px;">You have been invited to join <strong>${safeName}</strong> on 2keevo.</p>
 <p style="margin:0 0 16px;">Click below to accept the invitation and access your workspace.</p>
 <p style="margin:0 0 20px;"><a href="${safeLink}" style="display:inline-block;background:#1677ff;color:#ffffff;text-decoration:none;padding:10px 16px;border-radius:8px;">Open Invite</a></p>
-<p style="margin:0;color:#6b7280;font-size:13px;">Note: This invitation will expire in 14 days. If you don't have a Keevo account yet, please sign up using this email address first.</p>
+<p style="margin:0;color:#6b7280;font-size:13px;">Note: This invitation will expire in 14 days. If you don't have a 2keevo account yet, please sign up using this email address first.</p>
 </div>`;
     return this.deliver(input.to, subject, text, html);
   }
@@ -90,9 +90,9 @@ class EmailService {
       ? `${origin}/company/${input.companyId}`
       : `${origin}/notes`;
     const title = input.noteTitle || "A note";
-    const subject = "A note was shared with you on Keevo";
+    const subject = "A note was shared with you on 2keevo";
     const text = [
-      `"${title}" has been shared with you on Keevo.`,
+      `"${title}" has been shared with you on 2keevo.`,
       "",
       "Click below to open it.",
       "",
@@ -101,7 +101,7 @@ class EmailService {
     const safeTitle = escapeHtml(title);
     const safeLink = escapeHtml(link);
     const html = `<div style="font-family:Segoe UI,sans-serif;color:#1f2937;line-height:1.5;">
-<p style="margin:0 0 16px;"><strong>${safeTitle}</strong> has been shared with you on Keevo.</p>
+<p style="margin:0 0 16px;"><strong>${safeTitle}</strong> has been shared with you on 2keevo.</p>
 <p style="margin:0 0 16px;">Click below to open it.</p>
 <p style="margin:0;"><a href="${safeLink}" style="display:inline-block;background:#1677ff;color:#ffffff;text-decoration:none;padding:10px 16px;border-radius:8px;">Open Note</a></p>
 </div>`;
@@ -111,9 +111,9 @@ class EmailService {
   async sendPasswordReset(input: { to: string; token: string }) {
     const origin = EnvVars.FrontendOrigin || "http://localhost:5173";
     const link = `${origin}/auth/reset?token=${encodeURIComponent(input.token)}`;
-    const subject = "Reset your Keevo password";
+    const subject = "Reset your 2keevo password";
     const text = [
-      "We received a request to reset your Keevo password.",
+      "We received a request to reset your 2keevo password.",
       "",
       "Click below to choose a new password. This link expires in 1 hour.",
       "",
@@ -123,7 +123,7 @@ class EmailService {
     ].join("\n");
     const safeLink = escapeHtml(link);
     const html = `<div style="font-family:Segoe UI,sans-serif;color:#1f2937;line-height:1.5;">
-<p style="margin:0 0 16px;">We received a request to reset your Keevo password.</p>
+<p style="margin:0 0 16px;">We received a request to reset your 2keevo password.</p>
 <p style="margin:0 0 16px;">Click below to choose a new password. This link expires in 1 hour.</p>
 <p style="margin:0 0 20px;"><a href="${safeLink}" style="display:inline-block;background:#6d5efc;color:#ffffff;text-decoration:none;padding:10px 16px;border-radius:8px;">Reset password</a></p>
 <p style="margin:0;color:#6b7280;font-size:13px;">If you did not ask for this, you can ignore this email.</p>
