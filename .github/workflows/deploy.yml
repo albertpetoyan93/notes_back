@@ -6,64 +6,35 @@ on:
       - main
   workflow_dispatch:
 
-# A newer push replaces a deploy that is still running.
-concurrency:
-  group: deploy-backend
-  cancel-in-progress: true
-
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Build on GitHub's runner, not on the server: faster, and a broken build
-      # fails here before anything on the server changes.
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
-
-      - name: Install
-        run: npm ci --no-audit --no-fund
-
-      # ts-node loads preload.js, which needs an env file even just to compile.
-      # The values are not used by the build, so an empty one is enough here.
-      - name: Build
-        run: |
-          mkdir -p env
-          touch env/development.env
-          npm run build
-
-      # The whole repo plus the build: migrations run from src with ts-node.
-      # Env files never ship; the server keeps its own.
-      - name: Package
-        run: tar -czf backend-release.tgz --exclude=./node_modules --exclude=./.git --exclude='./env/*.env' --exclude=./backend-release.tgz .
-
-      - name: Upload release
+      - name: Deploy files to server
         uses: appleboy/scp-action@v1
         with:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           port: ${{ secrets.DEPLOY_PORT || 9999 }}
-          source: backend-release.tgz
-          target: ${{ secrets.DEPLOY_PATH_BACK }}/.deploy
+          source: ".,!node_modules,!dist,!.git,!env/production.env,!env/development.env,!*.log"
+          target: ${{ secrets.DEPLOY_PATH_BACK }}
           overwrite: true
+          rm: false
           timeout: 120s
 
-      - name: Install, migrate, restart
+      - name: Install, migrate, build, restart
         uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           port: ${{ secrets.DEPLOY_PORT || 9999 }}
-          command_timeout: 10m
           script: |
             set -e
             APP_DIR="${{ secrets.DEPLOY_PATH_BACK }}"
@@ -74,37 +45,9 @@ jobs:
               exit 1
             fi
 
-            NEW=.deploy/new
-            rm -rf "$NEW" && mkdir -p "$NEW"
-            tar -xzf .deploy/backend-release.tgz -C "$NEW"
-
-            # Mirror the release so files deleted in git are deleted here too.
-            # Server-only files (env, installed packages, logs, uploads) are kept.
-            if command -v rsync >/dev/null 2>&1; then
-              rsync -a --delete \
-                --exclude '/node_modules' \
-                --exclude '/env/*.env' \
-                --exclude '/.deploy' \
-                --exclude '/src/public/files' \
-                --exclude '*.log' \
-                "$NEW/" ./
-            else
-              echo "rsync is not installed: copying, but deleted files stay. Install it with: sudo apt install rsync"
-              cp -a "$NEW/." ./
-            fi
-
-            # Install packages only when package-lock.json changed since the last good install.
-            LOCK_HASH=$(sha256sum package-lock.json | cut -d' ' -f1)
-            if [ "$(cat node_modules/.lock-hash 2>/dev/null)" != "$LOCK_HASH" ]; then
-              echo "Dependencies changed, running npm ci"
-              npm ci --no-audit --no-fund
-              echo "$LOCK_HASH" > node_modules/.lock-hash
-            else
-              echo "Dependencies unchanged, skipping install"
-            fi
-
+            npm install
+            npm run build
             npm run migrate:prod
             pm2 reload ecosystem.config.js --update-env || pm2 start ecosystem.config.js
             pm2 save
-            rm -rf "$NEW" .deploy/backend-release.tgz
             pm2 status notes-backend
