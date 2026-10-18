@@ -31,12 +31,18 @@ jobs:
       - name: Install
         run: npm ci --no-audit --no-fund
 
+      # ts-node loads preload.js, which needs an env file even just to compile.
+      # The values are not used by the build, so an empty one is enough here.
       - name: Build
-        run: npm run build
+        run: |
+          mkdir -p env
+          touch env/development.env
+          npm run build
 
       # The whole repo plus the build: migrations run from src with ts-node.
+      # Env files never ship; the server keeps its own.
       - name: Package
-        run: tar -czf backend-release.tgz --exclude=./node_modules --exclude=./.git --exclude=./backend-release.tgz .
+        run: tar -czf backend-release.tgz --exclude=./node_modules --exclude=./.git --exclude='./env/*.env' --exclude=./backend-release.tgz .
 
       - name: Upload release
         uses: appleboy/scp-action@v1
