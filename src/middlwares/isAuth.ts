@@ -3,6 +3,7 @@ import { tokenVerify } from "@src/util/token";
 import HttpStatusCodes from "@src/common/HttpStatusCodes";
 import CustomError from "@src/util/CustomError";
 import UserService from "@src/services/UserService";
+import SessionService from "@src/services/SessionService";
 
 const isAuth: RequestHandler = async (
   req: any,
@@ -23,8 +24,9 @@ const isAuth: RequestHandler = async (
     if (!token) {
       throw new CustomError("Unauthorized", HttpStatusCodes.UNAUTHORIZED);
     }
-    const { userId, type } = tokenVerify(token);
-    if (!userId || type === "refresh") {
+    const { userId, type, sid } = tokenVerify(token);
+    // Only access tokens: refresh and 2FA-challenge tokens are signed with the same secret.
+    if (!userId || type !== "access") {
       throw new CustomError("Unauthorized", HttpStatusCodes.UNAUTHORIZED);
     }
     const user = await UserService.getUserById(userId);
@@ -33,7 +35,12 @@ const isAuth: RequestHandler = async (
       throw new CustomError("Unauthorized", HttpStatusCodes.UNAUTHORIZED);
     }
 
-    req.user = { id: userId, userId };
+    // Tokens from before per-device sessions have no sid; they expire within 15 minutes.
+    if (sid && !(await SessionService.isActive(sid, userId))) {
+      throw new CustomError("Unauthorized", HttpStatusCodes.UNAUTHORIZED);
+    }
+
+    req.user = { id: userId, userId, sessionId: sid };
   } catch (err) {
     throw new CustomError(
       "User is not authorized",

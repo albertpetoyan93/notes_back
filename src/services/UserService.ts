@@ -8,7 +8,14 @@ class UserService {
    */
   static async getUserById(userId: number) {
     const user = await User.findByPk(userId, {
-      attributes: ["id", "username", "email", "fullName", "createdAt"],
+      attributes: [
+        "id",
+        "username",
+        "email",
+        "fullName",
+        "twoFactorEnabled",
+        "createdAt",
+      ],
     });
 
     return user;

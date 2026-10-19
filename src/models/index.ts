@@ -15,6 +15,7 @@ import CollectionNote from "./CollectionNote";
 import CollectionShare from "./CollectionShare";
 import Company from "./Company";
 import CompanyMember from "./CompanyMember";
+import UserSession from "./UserSession";
 
 // Define all associations here to avoid circular dependencies
 function setupAssociations() {
@@ -231,6 +232,20 @@ function setupAssociations() {
     onUpdate: "cascade",
     onDelete: "cascade",
   });
+
+  User.hasMany(UserSession, {
+    as: "sessions",
+    foreignKey: "userId",
+    onUpdate: "cascade",
+    onDelete: "cascade",
+  });
+
+  UserSession.belongsTo(User, {
+    as: "user",
+    foreignKey: "userId",
+    onUpdate: "cascade",
+    onDelete: "cascade",
+  });
 }
 
 // Export default object with all models
@@ -244,5 +259,6 @@ export default {
   CollectionShare,
   Company,
   CompanyMember,
+  UserSession,
   setupAssociations,
 };

@@ -24,13 +24,15 @@ function baseOptions(): CookieOptions {
 export function setAuthCookies(
   res: Response,
   accessToken: string,
-  refreshToken: string
+  refreshToken: string | null
 ) {
   res.cookie(ACCESS_COOKIE, accessToken, {
     ...baseOptions(),
     maxAge: ACCESS_MAX_AGE_MS,
     path: "/",
   });
+  // Null: the browser already holds the newest refresh token (rotation grace).
+  if (!refreshToken) return;
   res.cookie(REFRESH_COOKIE, refreshToken, {
     ...baseOptions(),
     maxAge: REFRESH_MAX_AGE_MS,

@@ -5,6 +5,10 @@ import { AuthRequest } from "@src/types";
 import UserService from "@src/services/UserService";
 import { clearAuthCookies, setAuthCookies } from "@src/util/authCookies";
 import User from "@src/models/User";
+import SessionService, { SessionMeta } from "@src/services/SessionService";
+import TwoFactorService, { TwoFactorError } from "@src/services/TwoFactorService";
+import EmailService from "@src/services/EmailService";
+import logger from "jet-logger";
 
 function publicUser(user: {
   id: number;
@@ -20,6 +24,24 @@ function publicUser(user: {
   };
 }
 
+function sessionMeta(req: Request): SessionMeta {
+  return { userAgent: req.get("user-agent"), ip: req.ip };
+}
+
+function notifyTwoFactorChanged(user: User, enabled: boolean) {
+  EmailService.sendTwoFactorChanged({ to: user.email, enabled }).catch(
+    (error) => logger.err(error, true)
+  );
+}
+
+async function currentUser(req: AuthRequest, res: Response) {
+  const user = req.user?.id ? await User.findByPk(req.user.id) : null;
+  if (!user) {
+    res.status(HttpStatusCodes.UNAUTHORIZED).send({ message: "Unauthorized" });
+  }
+  return user;
+}
+
 export default class AuthController {
   static login = async (req: Request, res: Response, next: NextFunction) => {
     // #swagger.tags = ["Auth"]
@@ -30,7 +52,15 @@ export default class AuthController {
       const { email, password } = req.body;
 
       const user = await AuthService.login({ email, password });
-      const session = await AuthService.issueSession(user);
+      if (user.twoFactorEnabled) {
+        res.status(HttpStatusCodes.OK).send({
+          twoFactorRequired: true,
+          challengeToken: AuthService.createLoginChallenge(user, "web"),
+        });
+        return;
+      }
+
+      const session = await AuthService.issueSession(user, sessionMeta(req));
       setAuthCookies(res, session.accessToken, session.refreshToken);
 
       res.status(HttpStatusCodes.OK).send({
@@ -57,7 +87,7 @@ export default class AuthController {
         fullName,
       });
 
-      const session = await AuthService.issueSession(user);
+      const session = await AuthService.issueSession(user, sessionMeta(req));
       setAuthCookies(res, session.accessToken, session.refreshToken);
 
       res.status(HttpStatusCodes.CREATED).send({
@@ -83,7 +113,18 @@ export default class AuthController {
     try {
       const { email, password } = req.body;
       const user = await AuthService.login({ email, password });
-      const session = await AuthService.issueExtensionSession(user);
+      if (user.twoFactorEnabled) {
+        res.status(HttpStatusCodes.OK).send({
+          twoFactorRequired: true,
+          challengeToken: AuthService.createLoginChallenge(user, "extension"),
+        });
+        return;
+      }
+
+      const session = await AuthService.issueExtensionSession(
+        user,
+        sessionMeta(req)
+      );
 
       res.status(HttpStatusCodes.OK).send({
         user: publicUser(user),
@@ -121,7 +162,10 @@ export default class AuthController {
         return;
       }
 
-      const session = await AuthService.issueExtensionSession(user);
+      const session = await AuthService.issueExtensionSession(
+        user,
+        sessionMeta(req as unknown as Request)
+      );
       res.status(HttpStatusCodes.OK).send({
         user: publicUser(user),
         accessToken: session.accessToken,
@@ -135,7 +179,8 @@ export default class AuthController {
   static extensionRefresh = async (req: Request, res: Response) => {
     try {
       const session = await AuthService.rotateExtensionSession(
-        req.body?.refreshToken
+        req.body?.refreshToken,
+        sessionMeta(req)
       );
       res.status(HttpStatusCodes.OK).send(session);
     } catch {
@@ -188,7 +233,8 @@ export default class AuthController {
   static refresh = async (req: Request, res: Response) => {
     try {
       const session = await AuthService.rotateSession(
-        req.cookies?.refresh_token
+        req.cookies?.refresh_token,
+        sessionMeta(req)
       );
       setAuthCookies(res, session.accessToken, session.refreshToken);
       res.status(HttpStatusCodes.OK).send({ ok: true });
@@ -205,6 +251,209 @@ export default class AuthController {
     clearAuthCookies(res);
     res.status(HttpStatusCodes.OK).send({ ok: true });
   };
+
+  static verifyTwoFactor = async (
+    req: Request,
+    res: Response,
+    next: NextFunction
+  ) => {
+    try {
+      const user = await AuthService.readLoginChallenge(
+        req.body?.challengeToken,
+        "web"
+      );
+      if (!(await TwoFactorService.verify(user.id, req.body?.code))) {
+        res
+          .status(HttpStatusCodes.UNAUTHORIZED)
+          .send({ message: "That code is not valid." });
+        return;
+      }
+
+      const session = await AuthService.issueSession(user, sessionMeta(req));
+      setAuthCookies(res, session.accessToken, session.refreshToken);
+      res.status(HttpStatusCodes.OK).send({ user: publicUser(user) });
+    } catch (e: any) {
+      if (e.message === "Sign-in expired. Enter your password again.") {
+        res.status(HttpStatusCodes.UNAUTHORIZED).send({ message: e.message });
+      } else {
+        next(e);
+      }
+    }
+  };
+
+  static extensionVerifyTwoFactor = async (
+    req: Request,
+    res: Response,
+    next: NextFunction
+  ) => {
+    try {
+      const user = await AuthService.readLoginChallenge(
+        req.body?.challengeToken,
+        "extension"
+      );
+      if (!(await TwoFactorService.verify(user.id, req.body?.code))) {
+        res
+          .status(HttpStatusCodes.UNAUTHORIZED)
+          .send({ message: "That code is not valid." });
+        return;
+      }
+
+      const session = await AuthService.issueExtensionSession(
+        user,
+        sessionMeta(req)
+      );
+      res.status(HttpStatusCodes.OK).send({
+        user: publicUser(user),
+        accessToken: session.accessToken,
+        refreshToken: session.refreshToken,
+      });
+    } catch (e: any) {
+      if (e.message === "Sign-in expired. Enter your password again.") {
+        res.status(HttpStatusCodes.UNAUTHORIZED).send({ message: e.message });
+      } else {
+        next(e);
+      }
+    }
+  };
+
+  static twoFactorStatus = async (req: AuthRequest, res: Response) => {
+    const user = await currentUser(req, res);
+    if (!user) return;
+    res.status(HttpStatusCodes.OK).send(TwoFactorService.status(user));
+  };
+
+  static twoFactorSetup = async (
+    req: AuthRequest,
+    res: Response,
+    next: NextFunction
+  ) => {
+    try {
+      const user = await currentUser(req, res);
+      if (!user) return;
+      res.status(HttpStatusCodes.OK).send(await TwoFactorService.setup(user));
+    } catch (e) {
+      AuthController.twoFactorFailure(e, res, next);
+    }
+  };
+
+  static twoFactorEnable = async (
+    req: AuthRequest,
+    res: Response,
+    next: NextFunction
+  ) => {
+    try {
+      const user = await currentUser(req, res);
+      if (!user) return;
+      const recoveryCodes = await TwoFactorService.enable(user, req.body?.code);
+      // Anyone already signed in elsewhere has not passed the new second factor.
+      await SessionService.revokeAll(user.id, req.user?.sessionId);
+      notifyTwoFactorChanged(user, true);
+      res.status(HttpStatusCodes.OK).send({ recoveryCodes });
+    } catch (e) {
+      AuthController.twoFactorFailure(e, res, next);
+    }
+  };
+
+  static twoFactorDisable = async (
+    req: AuthRequest,
+    res: Response,
+    next: NextFunction
+  ) => {
+    try {
+      const user = await currentUser(req, res);
+      if (!user) return;
+      await TwoFactorService.disable(user, req.body?.password, req.body?.code);
+      notifyTwoFactorChanged(user, false);
+      res.status(HttpStatusCodes.OK).send({ ok: true });
+    } catch (e) {
+      AuthController.twoFactorFailure(e, res, next);
+    }
+  };
+
+  static twoFactorRecoveryCodes = async (
+    req: AuthRequest,
+    res: Response,
+    next: NextFunction
+  ) => {
+    try {
+      const user = await currentUser(req, res);
+      if (!user) return;
+      const recoveryCodes = await TwoFactorService.regenerateRecoveryCodes(
+        user,
+        req.body?.code
+      );
+      res.status(HttpStatusCodes.OK).send({ recoveryCodes });
+    } catch (e) {
+      AuthController.twoFactorFailure(e, res, next);
+    }
+  };
+
+  static listSessions = async (req: AuthRequest, res: Response) => {
+    const userId = req.user?.id;
+    if (!userId) {
+      res.status(HttpStatusCodes.UNAUTHORIZED).send({ message: "Unauthorized" });
+      return;
+    }
+
+    const sessions = await SessionService.list(userId);
+    res.status(HttpStatusCodes.OK).send(
+      sessions.map((session) => ({
+        id: session.id,
+        kind: session.kind,
+        userAgent: session.userAgent,
+        ip: session.ip,
+        lastUsedAt: session.lastUsedAt,
+        createdAt: session.createdAt,
+        current: session.id === req.user?.sessionId,
+      }))
+    );
+  };
+
+  static revokeSession = async (req: AuthRequest, res: Response) => {
+    const userId = req.user?.id;
+    const sessionId = parseInt(String(req.params.id), 10);
+    if (!userId) {
+      res.status(HttpStatusCodes.UNAUTHORIZED).send({ message: "Unauthorized" });
+      return;
+    }
+
+    const removed = isNaN(sessionId)
+      ? 0
+      : await SessionService.revoke(userId, sessionId);
+    if (!removed) {
+      res
+        .status(HttpStatusCodes.NOT_FOUND)
+        .send({ message: "Session not found" });
+      return;
+    }
+    if (sessionId === req.user?.sessionId) {
+      clearAuthCookies(res);
+    }
+    res.status(HttpStatusCodes.OK).send({ ok: true });
+  };
+
+  static revokeOtherSessions = async (req: AuthRequest, res: Response) => {
+    const userId = req.user?.id;
+    if (!userId) {
+      res.status(HttpStatusCodes.UNAUTHORIZED).send({ message: "Unauthorized" });
+      return;
+    }
+
+    await SessionService.revokeAll(userId, req.user?.sessionId);
+    res.status(HttpStatusCodes.OK).send({ ok: true });
+  };
+
+  private static twoFactorFailure(
+    e: unknown,
+    res: Response,
+    next: NextFunction
+  ) {
+    if (e instanceof TwoFactorError) {
+      res.status(HttpStatusCodes.BAD_REQUEST).send({ message: e.message });
+    } else {
+      next(e);
+    }
+  }
 
   static me = async (req: AuthRequest, res: Response, next: NextFunction) => {
     // #swagger.tags = ["Auth"]

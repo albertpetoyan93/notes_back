@@ -12,6 +12,10 @@ interface UserAttributes {
   extensionRefreshTokenId?: string | null;
   passwordResetTokenHash?: string | null;
   passwordResetExpires?: Date | null;
+  twoFactorEnabled?: boolean;
+  twoFactorSecret?: string | null;
+  twoFactorRecoveryCodes?: string[] | null;
+  twoFactorLastStep?: number | null;
   createdAt?: Date;
   updatedAt?: Date;
 }
@@ -25,6 +29,10 @@ interface UserCreationAttributes
     | "extensionRefreshTokenId"
     | "passwordResetTokenHash"
     | "passwordResetExpires"
+    | "twoFactorEnabled"
+    | "twoFactorSecret"
+    | "twoFactorRecoveryCodes"
+    | "twoFactorLastStep"
     | "createdAt"
     | "updatedAt"
   > {}
@@ -42,6 +50,10 @@ class User
   public extensionRefreshTokenId?: string | null;
   public passwordResetTokenHash?: string | null;
   public passwordResetExpires?: Date | null;
+  public twoFactorEnabled!: boolean;
+  public twoFactorSecret?: string | null;
+  public twoFactorRecoveryCodes?: string[] | null;
+  public twoFactorLastStep?: number | null;
   public readonly createdAt!: Date;
   public readonly updatedAt!: Date;
 
@@ -94,6 +106,28 @@ User.init(
     passwordResetExpires: {
       type: DataTypes.DATE,
       allowNull: true,
+    },
+    twoFactorEnabled: {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: false,
+    },
+    twoFactorSecret: {
+      type: DataTypes.TEXT,
+      allowNull: true,
+    },
+    twoFactorRecoveryCodes: {
+      type: DataTypes.JSONB,
+      allowNull: true,
+    },
+    twoFactorLastStep: {
+      type: DataTypes.BIGINT,
+      allowNull: true,
+      // Postgres returns BIGINT as a string.
+      get() {
+        const value = this.getDataValue("twoFactorLastStep");
+        return value === null || value === undefined ? null : Number(value);
+      },
     },
   },
   {

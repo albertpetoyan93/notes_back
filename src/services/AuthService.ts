@@ -6,6 +6,8 @@ import { Op } from "sequelize";
 import jwt from "jsonwebtoken";
 import crypto from "crypto";
 import EnvVars from "../common/EnvVars";
+import { SessionKind } from "../models/UserSession";
+import SessionService, { SessionMeta } from "./SessionService";
 
 const RESET_MESSAGE =
   "If an account exists for that email, we sent a reset link.";
@@ -72,86 +74,58 @@ class AuthService {
     return user;
   }
 
-  static async issueSession(user: User) {
-    const refreshTokenId = crypto.randomBytes(32).toString("hex");
-    await user.update({ refreshTokenId });
-
-    return {
-      accessToken: this.signAccessToken(user.id),
-      refreshToken: this.signRefreshToken(user.id, refreshTokenId),
-    };
+  static issueSession(user: User, meta: SessionMeta = {}) {
+    return SessionService.create(user.id, "web", meta);
   }
 
   /**
    * Exchange a valid refresh token for a new access token and a new refresh token.
    * The previous refresh token stops working.
    */
-  static async rotateSession(refreshToken?: string) {
-    if (!refreshToken) {
-      throw new Error("Invalid refresh token");
-    }
+  static rotateSession(refreshToken?: string, meta: SessionMeta = {}) {
+    return SessionService.rotate(refreshToken, "web", meta);
+  }
 
-    let payload: jwt.JwtPayload;
+  static async issueExtensionSession(user: User, meta: SessionMeta = {}) {
+    const session = await SessionService.create(user.id, "extension", meta);
+    return { accessToken: session.accessToken, refreshToken: session.refreshToken };
+  }
+
+  static async rotateExtensionSession(refreshToken?: string, meta: SessionMeta = {}) {
+    const session = await SessionService.rotate(refreshToken, "extension", meta);
+    return { accessToken: session.accessToken, refreshToken: session.refreshToken };
+  }
+
+  static revokeExtensionSession(refreshToken?: string) {
+    return SessionService.revokeByToken(refreshToken, "extension");
+  }
+
+  /**
+   * Password was right but 2FA is on: a short-lived token that only
+   * /2fa/verify accepts, so the code step does not ask for the password again.
+   */
+  static createLoginChallenge(user: User, kind: SessionKind) {
+    return jwt.sign({ userId: user.id, type: "2fa", kind }, EnvVars.Jwt.Secret, {
+      expiresIn: "5m",
+    });
+  }
+
+  static async readLoginChallenge(token: string | undefined, kind: SessionKind) {
     try {
-      const decoded = jwt.verify(refreshToken, EnvVars.Jwt.Secret);
-      if (typeof decoded === "string") {
-        throw new Error("Invalid refresh token");
-      }
-      payload = decoded;
-    } catch {
-      throw new Error("Invalid refresh token");
-    }
-
-    if (payload.type !== "refresh" || !payload.userId || !payload.jti) {
-      throw new Error("Invalid refresh token");
-    }
-
-    const user = await User.findByPk(payload.userId);
-    if (!user || user.refreshTokenId !== payload.jti) {
-      throw new Error("Invalid refresh token");
-    }
-
-    const refreshTokenId = crypto.randomBytes(32).toString("hex");
-    await user.update({ refreshTokenId });
-
-    return {
-      accessToken: this.signAccessToken(user.id),
-      refreshToken: this.signRefreshToken(user.id, refreshTokenId),
-    };
-  }
-
-  static async issueExtensionSession(user: User) {
-    const extensionRefreshTokenId = crypto.randomBytes(32).toString("hex");
-    await user.update({ extensionRefreshTokenId });
-
-    return {
-      accessToken: this.signAccessToken(user.id),
-      refreshToken: this.signRefreshToken(user.id, extensionRefreshTokenId),
-    };
-  }
-
-  static async rotateExtensionSession(refreshToken?: string) {
-    const payload = this.readRefreshPayload(refreshToken);
-    const user = await User.findByPk(payload.userId);
-    if (!user || user.extensionRefreshTokenId !== payload.jti) {
-      throw new Error("Invalid refresh token");
-    }
-
-    return this.issueExtensionSession(user);
-  }
-
-  static async revokeExtensionSession(refreshToken?: string) {
-    if (!refreshToken) return;
-
-    try {
-      const payload = this.readRefreshPayload(refreshToken);
-      const user = await User.findByPk(payload.userId);
-      if (user && user.extensionRefreshTokenId === payload.jti) {
-        await user.update({ extensionRefreshTokenId: null });
+      const decoded = jwt.verify(String(token || ""), EnvVars.Jwt.Secret);
+      if (
+        typeof decoded !== "string" &&
+        decoded.type === "2fa" &&
+        decoded.kind === kind &&
+        decoded.userId
+      ) {
+        const user = await User.findByPk(decoded.userId);
+        if (user && user.twoFactorEnabled) return user;
       }
     } catch {
-      return;
+      // Falls through to the error below.
     }
+    throw new Error("Sign-in expired. Enter your password again.");
   }
 
   static async requestPasswordReset(email: string) {
@@ -222,59 +196,12 @@ class AuthService {
       password,
       passwordResetTokenHash: null,
       passwordResetExpires: null,
-      refreshTokenId: null,
-      extensionRefreshTokenId: null,
     });
+    await SessionService.revokeAll(user.id);
   }
 
-  static async revokeSession(refreshToken?: string) {
-    if (!refreshToken) return;
-
-    try {
-      const decoded = jwt.verify(refreshToken, EnvVars.Jwt.Secret);
-      if (typeof decoded === "string" || decoded.type !== "refresh") return;
-      const user = await User.findByPk(decoded.userId);
-      if (user && user.refreshTokenId === decoded.jti) {
-        await user.update({ refreshTokenId: null });
-      }
-    } catch {
-      return;
-    }
-  }
-
-  private static readRefreshPayload(refreshToken?: string) {
-    if (!refreshToken) {
-      throw new Error("Invalid refresh token");
-    }
-
-    let payload: jwt.JwtPayload;
-    try {
-      const decoded = jwt.verify(refreshToken, EnvVars.Jwt.Secret);
-      if (typeof decoded === "string") {
-        throw new Error("Invalid refresh token");
-      }
-      payload = decoded;
-    } catch {
-      throw new Error("Invalid refresh token");
-    }
-
-    if (payload.type !== "refresh" || !payload.userId || !payload.jti) {
-      throw new Error("Invalid refresh token");
-    }
-
-    return payload;
-  }
-
-  private static signAccessToken(userId: number) {
-    return jwt.sign({ userId, type: "access" }, EnvVars.Jwt.Secret, {
-      expiresIn: "15m",
-    });
-  }
-
-  private static signRefreshToken(userId: number, jti: string) {
-    return jwt.sign({ userId, type: "refresh", jti }, EnvVars.Jwt.Secret, {
-      expiresIn: "7d",
-    });
+  static revokeSession(refreshToken?: string) {
+    return SessionService.revokeByToken(refreshToken, "web");
   }
 }
 

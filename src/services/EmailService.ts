@@ -130,6 +130,27 @@ class EmailService {
 </div>`;
     return this.deliver(input.to, subject, text, html);
   }
+
+  async sendTwoFactorChanged(input: { to: string; enabled: boolean }) {
+    const origin = EnvVars.FrontendOrigin || "http://localhost:5173";
+    const link = `${origin}/settings/security`;
+    const state = input.enabled ? "turned on" : "turned off";
+    const subject = `Two-factor authentication was ${state} on 2keevo`;
+    const text = [
+      `Two-factor authentication was ${state} for your 2keevo account.`,
+      "",
+      "If this was not you, reset your password right away and review your security settings:",
+      "",
+      link,
+    ].join("\n");
+    const safeLink = escapeHtml(link);
+    const html = `<div style="font-family:Segoe UI,sans-serif;color:#1f2937;line-height:1.5;">
+<p style="margin:0 0 16px;">Two-factor authentication was <strong>${state}</strong> for your 2keevo account.</p>
+<p style="margin:0 0 16px;">If this was not you, reset your password right away and review your security settings.</p>
+<p style="margin:0;"><a href="${safeLink}" style="display:inline-block;background:#6d5efc;color:#ffffff;text-decoration:none;padding:10px 16px;border-radius:8px;">Security settings</a></p>
+</div>`;
+    return this.deliver(input.to, subject, text, html);
+  }
 }
 
 export default new EmailService();
