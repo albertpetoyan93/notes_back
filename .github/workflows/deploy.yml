@@ -6,6 +6,11 @@ on:
       - main
   workflow_dispatch:
 
+# A newer push waits for a running deploy; never cancel one mid-migration.
+concurrency:
+  group: deploy-backend
+  cancel-in-progress: false
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -15,26 +20,48 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Deploy files to server
+      # Build on GitHub's runner, not on the server: compiling TypeScript there
+      # took longer than the deploy timeout. A broken build fails here, before
+      # anything on the server changes.
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install
+        run: npm ci --no-audit --no-fund
+
+      - name: Build
+        run: npm run build
+
+      # Only what runs in production: compiled code (migrations included),
+      # the files that start it, and the lock file for production dependencies.
+      - name: Package
+        run: >
+          tar -czf backend-release.tgz
+          dist package.json package-lock.json preload.js start-prod.js ecosystem.config.js
+
+      - name: Upload release
         uses: appleboy/scp-action@v1
         with:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           port: ${{ secrets.DEPLOY_PORT || 9999 }}
-          source: ".,!node_modules,!dist,!.git,!env/production.env,!env/development.env,!*.log"
-          target: ${{ secrets.DEPLOY_PATH_BACK }}
+          source: backend-release.tgz
+          target: ${{ secrets.DEPLOY_PATH_BACK }}/.deploy
           overwrite: true
-          rm: false
           timeout: 120s
 
-      - name: Install, migrate, build, restart
+      - name: Install, migrate, restart
         uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           port: ${{ secrets.DEPLOY_PORT || 9999 }}
+          command_timeout: 15m
           script: |
             set -e
             APP_DIR="${{ secrets.DEPLOY_PATH_BACK }}"
@@ -45,9 +72,36 @@ jobs:
               exit 1
             fi
 
-            npm install
-            npm run build
-            npm run migrate:prod
+            NEW=.deploy/new
+            rm -rf "$NEW" && mkdir -p "$NEW"
+            tar -xzf .deploy/backend-release.tgz -C "$NEW"
+
+            # Production dependencies only, and only when the lock file changed.
+            if ! cmp -s "$NEW/package-lock.json" package-lock.json || [ ! -d node_modules ]; then
+              echo "Dependencies changed, installing"
+              cp "$NEW/package.json" "$NEW/package-lock.json" .
+              npm install --omit=dev --no-audit --no-fund
+            else
+              echo "Dependencies unchanged, skipping install"
+              cp "$NEW/package.json" .
+            fi
+            cp "$NEW/preload.js" "$NEW/start-prod.js" "$NEW/ecosystem.config.js" .
+
+            # Swap in the new build; the old one stays as dist.previous for rollback.
+            rm -rf dist.previous
+            if [ -d dist ]; then mv dist dist.previous; fi
+            mv "$NEW/dist" dist
+            rm -rf "$NEW" .deploy/backend-release.tgz
+
+            # Migrations run from the compiled build (no ts-node on the server).
+            # If one fails, put the old build back; the running server is untouched.
+            if ! npm run migrate:release; then
+              echo "Migration failed, restoring the previous build"
+              rm -rf dist
+              if [ -d dist.previous ]; then mv dist.previous dist; fi
+              exit 1
+            fi
+
             pm2 reload ecosystem.config.js --update-env || pm2 start ecosystem.config.js
             pm2 save
             pm2 status notes-backend
