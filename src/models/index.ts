@@ -16,6 +16,7 @@ import CollectionShare from "./CollectionShare";
 import Company from "./Company";
 import CompanyMember from "./CompanyMember";
 import UserSession from "./UserSession";
+import AuditEvent from "./AuditEvent";
 
 // Define all associations here to avoid circular dependencies
 function setupAssociations() {
@@ -246,6 +247,9 @@ function setupAssociations() {
     onUpdate: "cascade",
     onDelete: "cascade",
   });
+
+  AuditEvent.belongsTo(User, { as: "actor", foreignKey: "actorId", constraints: false });
+  AuditEvent.belongsTo(User, { as: "target", foreignKey: "targetUserId", constraints: false });
 }
 
 // Export default object with all models
@@ -260,5 +264,6 @@ export default {
   Company,
   CompanyMember,
   UserSession,
+  AuditEvent,
   setupAssociations,
 };

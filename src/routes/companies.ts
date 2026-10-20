@@ -16,6 +16,11 @@ router.delete(
   CompanyController.unshareCollection as RequestHandler
 );
 router.get("/:id/members", CompanyController.members as RequestHandler);
+router.get("/:id/activity", CompanyController.activity as RequestHandler);
+router.get(
+  "/:id/members/:memberId/access",
+  CompanyController.memberAccess as RequestHandler
+);
 router.put("/:id/members/:memberId", CompanyController.updateMember as RequestHandler);
 router.delete("/:id/members/:memberId", CompanyController.removeMember as RequestHandler);
 router.post("/:id/invites", CompanyController.invite as RequestHandler);

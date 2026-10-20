@@ -13,6 +13,7 @@ router.delete("/:id/notes/:noteId", CollectionController.removeNote as RequestHa
 router.get("/:id/shares", CollectionController.shares as RequestHandler);
 router.post("/:id/share", CollectionController.share as RequestHandler);
 router.delete("/:id/share/:userId", CollectionController.revoke as RequestHandler);
+router.post("/:id/leave", CollectionController.leave as RequestHandler);
 router.put("/:id", CollectionController.rename as RequestHandler);
 router.delete("/:id", CollectionController.remove as RequestHandler);
 

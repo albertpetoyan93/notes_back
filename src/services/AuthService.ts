@@ -198,6 +198,7 @@ class AuthService {
       passwordResetExpires: null,
     });
     await SessionService.revokeAll(user.id);
+    return user.id;
   }
 
   static revokeSession(refreshToken?: string) {

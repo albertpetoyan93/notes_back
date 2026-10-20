@@ -9,6 +9,7 @@ import SessionService, { SessionMeta } from "@src/services/SessionService";
 import TwoFactorService, { TwoFactorError } from "@src/services/TwoFactorService";
 import EmailService from "@src/services/EmailService";
 import logger from "jet-logger";
+import AuditService from "@src/services/AuditService";
 
 function publicUser(user: {
   id: number;
@@ -32,6 +33,13 @@ function notifyTwoFactorChanged(user: User, enabled: boolean) {
   EmailService.sendTwoFactorChanged({ to: user.email, enabled }).catch(
     (error) => logger.err(error, true)
   );
+}
+
+async function recordFailedLogin(req: Request, kind: "web" | "extension") {
+  const email = String(req.body?.email || "").trim();
+  const user = email ? await User.findOne({ where: { email }, attributes: ["id"] }) : null;
+  if (!user) return;
+  await AuditService.record({ actorId: user.id, action: "login_failed", details: { kind }, req });
 }
 
 async function currentUser(req: AuthRequest, res: Response) {
@@ -62,12 +70,14 @@ export default class AuthController {
 
       const session = await AuthService.issueSession(user, sessionMeta(req));
       setAuthCookies(res, session.accessToken, session.refreshToken);
+      await AuditService.record({ actorId: user.id, action: "login", details: { kind: "web" }, req });
 
       res.status(HttpStatusCodes.OK).send({
         user: publicUser(user),
       });
     } catch (e: any) {
       if (e.message === "Invalid credentials") {
+        await recordFailedLogin(req, "web");
         res.status(HttpStatusCodes.UNAUTHORIZED).send({ message: e.message });
       } else {
         next(e);
@@ -125,6 +135,12 @@ export default class AuthController {
         user,
         sessionMeta(req)
       );
+      await AuditService.record({
+        actorId: user.id,
+        action: "login",
+        details: { kind: "extension" },
+        req,
+      });
 
       res.status(HttpStatusCodes.OK).send({
         user: publicUser(user),
@@ -133,6 +149,7 @@ export default class AuthController {
       });
     } catch (e: any) {
       if (e.message === "Invalid credentials") {
+        await recordFailedLogin(req, "extension");
         res.status(HttpStatusCodes.UNAUTHORIZED).send({ message: e.message });
       } else {
         next(e);
@@ -214,7 +231,11 @@ export default class AuthController {
     next: NextFunction
   ) => {
     try {
-      await AuthService.resetPassword(req.body?.token, req.body?.password);
+      const resetUserId = await AuthService.resetPassword(
+        req.body?.token,
+        req.body?.password
+      );
+      await AuditService.record({ actorId: resetUserId, action: "password_reset", req });
       res.status(HttpStatusCodes.OK).send({
         message: "Password updated. Sign in with the new password.",
       });
@@ -263,6 +284,12 @@ export default class AuthController {
         "web"
       );
       if (!(await TwoFactorService.verify(user.id, req.body?.code))) {
+        await AuditService.record({
+          actorId: user.id,
+          action: "two_factor_failed",
+          details: { kind: "web" },
+          req,
+        });
         res
           .status(HttpStatusCodes.UNAUTHORIZED)
           .send({ message: "That code is not valid." });
@@ -271,6 +298,12 @@ export default class AuthController {
 
       const session = await AuthService.issueSession(user, sessionMeta(req));
       setAuthCookies(res, session.accessToken, session.refreshToken);
+      await AuditService.record({
+        actorId: user.id,
+        action: "login",
+        details: { kind: "web", twoFactor: true },
+        req,
+      });
       res.status(HttpStatusCodes.OK).send({ user: publicUser(user) });
     } catch (e: any) {
       if (e.message === "Sign-in expired. Enter your password again.") {
@@ -292,6 +325,12 @@ export default class AuthController {
         "extension"
       );
       if (!(await TwoFactorService.verify(user.id, req.body?.code))) {
+        await AuditService.record({
+          actorId: user.id,
+          action: "two_factor_failed",
+          details: { kind: "extension" },
+          req,
+        });
         res
           .status(HttpStatusCodes.UNAUTHORIZED)
           .send({ message: "That code is not valid." });
@@ -302,6 +341,12 @@ export default class AuthController {
         user,
         sessionMeta(req)
       );
+      await AuditService.record({
+        actorId: user.id,
+        action: "login",
+        details: { kind: "extension", twoFactor: true },
+        req,
+      });
       res.status(HttpStatusCodes.OK).send({
         user: publicUser(user),
         accessToken: session.accessToken,
@@ -348,6 +393,7 @@ export default class AuthController {
       // Anyone already signed in elsewhere has not passed the new second factor.
       await SessionService.revokeAll(user.id, req.user?.sessionId);
       notifyTwoFactorChanged(user, true);
+      await AuditService.record({ actorId: user.id, action: "two_factor_enabled", req: req as unknown as Request });
       res.status(HttpStatusCodes.OK).send({ recoveryCodes });
     } catch (e) {
       AuthController.twoFactorFailure(e, res, next);
@@ -364,6 +410,7 @@ export default class AuthController {
       if (!user) return;
       await TwoFactorService.disable(user, req.body?.password, req.body?.code);
       notifyTwoFactorChanged(user, false);
+      await AuditService.record({ actorId: user.id, action: "two_factor_disabled", req: req as unknown as Request });
       res.status(HttpStatusCodes.OK).send({ ok: true });
     } catch (e) {
       AuthController.twoFactorFailure(e, res, next);
@@ -382,6 +429,11 @@ export default class AuthController {
         user,
         req.body?.code
       );
+      await AuditService.record({
+        actorId: user.id,
+        action: "recovery_codes_regenerated",
+        req: req as unknown as Request,
+      });
       res.status(HttpStatusCodes.OK).send({ recoveryCodes });
     } catch (e) {
       AuthController.twoFactorFailure(e, res, next);
@@ -426,6 +478,12 @@ export default class AuthController {
         .send({ message: "Session not found" });
       return;
     }
+    await AuditService.record({
+      actorId: userId,
+      action: "session_revoked",
+      details: { sessionId },
+      req: req as unknown as Request,
+    });
     if (sessionId === req.user?.sessionId) {
       clearAuthCookies(res);
     }
@@ -440,7 +498,24 @@ export default class AuthController {
     }
 
     await SessionService.revokeAll(userId, req.user?.sessionId);
+    await AuditService.record({
+      actorId: userId,
+      action: "other_sessions_revoked",
+      req: req as unknown as Request,
+    });
     res.status(HttpStatusCodes.OK).send({ ok: true });
+  };
+
+  static accountActivity = async (req: AuthRequest, res: Response) => {
+    const userId = req.user?.id;
+    if (!userId) {
+      res.status(HttpStatusCodes.UNAUTHORIZED).send({ message: "Unauthorized" });
+      return;
+    }
+    const before = parseInt(String(req.query.before || ""));
+    res
+      .status(HttpStatusCodes.OK)
+      .send(await AuditService.accountActivity(userId, isNaN(before) ? undefined : before));
   };
 
   private static twoFactorFailure(

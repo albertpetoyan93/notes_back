@@ -1,5 +1,8 @@
 import { Response } from "express";
 import NoteService from "../services/NoteService";
+import AuditService from "../services/AuditService";
+import NotificationService from "../services/NotificationService";
+import User from "../models/User";
 
 export default class NoteController {
   static autofill = async (req: any, res: Response) => {
@@ -14,6 +17,16 @@ export default class NoteController {
         String(req.query.host || ""),
         String(req.query.q || "")
       );
+      // The extension now holds these passwords.
+      for (const match of matches) {
+        await AuditService.record({
+          actorId: userId,
+          action: "item_autofilled",
+          noteId: match.id,
+          details: { host: String(req.query.host || "").slice(0, 200) },
+          req,
+        });
+      }
       res.json(matches);
     } catch (error: any) {
       const status = error?.status || 500;
@@ -116,6 +129,12 @@ export default class NoteController {
         collectionId,
         collectionIds,
       });
+      await AuditService.record({
+        actorId: userId,
+        action: "item_created",
+        noteId: (note as any)?.id,
+        req,
+      });
 
       res.status(201).json(note);
     } catch (error) {
@@ -129,6 +148,13 @@ export default class NoteController {
       const userId = req.user?.id;
       if (!userId) return res.status(401).json({ message: "Unauthorized" });
       const backup = await NoteService.exportNotes(userId);
+      const exported = (backup as any)?.notes;
+      await AuditService.record({
+        actorId: userId,
+        action: "vault_exported",
+        details: Array.isArray(exported) ? { count: exported.length } : {},
+        req,
+      });
       res.json(backup);
     } catch (error) {
       console.error("Error exporting notes:", error);
@@ -142,6 +168,12 @@ export default class NoteController {
       if (!userId) return res.status(401).json({ message: "Unauthorized" });
       const notes = Array.isArray(req.body) ? req.body : req.body?.notes;
       const result = await NoteService.importNotes(userId, notes);
+      await AuditService.record({
+        actorId: userId,
+        action: "vault_imported",
+        details: { count: (result as any)?.imported },
+        req,
+      });
       res.status(201).json(result);
     } catch (error: any) {
       console.error("Error importing notes:", error);
@@ -218,6 +250,17 @@ export default class NoteController {
       if (!note) {
         return res.status(404).json({ message: "Note not found" });
       }
+      await AuditService.record({
+        actorId: userId,
+        action: "item_updated",
+        noteId,
+        details: {
+          changed: ["title", "content", "category", "tags", "collectionIds"].filter(
+            (key) => req.body?.[key] !== undefined
+          ),
+        },
+        req,
+      });
 
       res.json(note);
     } catch (error: any) {
@@ -250,6 +293,7 @@ export default class NoteController {
         return res.status(404).json({ message: "Note not found" });
       }
 
+      await AuditService.record({ actorId: userId, action: "item_trashed", noteId, req });
       res.json({ message: "Note moved to trash" });
     } catch (error) {
       console.error("Error deleting note:", error);
@@ -277,6 +321,7 @@ export default class NoteController {
         return res.status(404).json({ message: "Note not found in trash" });
       }
 
+      await AuditService.record({ actorId: userId, action: "item_restored", noteId, req });
       res.json({ message: "Note restored" });
     } catch (error) {
       console.error("Error restoring note:", error);
@@ -289,6 +334,14 @@ export default class NoteController {
       const userId = req.user?.id;
       if (!userId) return res.status(401).json({ message: "Unauthorized" });
       const deleted = await NoteService.emptyTrash(userId);
+      if (deleted) {
+        await AuditService.record({
+          actorId: userId,
+          action: "trash_emptied",
+          details: { count: deleted },
+          req,
+        });
+      }
       res.json({ deleted });
     } catch (error) {
       console.error("Error emptying trash:", error);
@@ -310,6 +363,15 @@ export default class NoteController {
         action,
         collectionId ?? null
       );
+      for (const noteId of (result as { noteIds?: number[] }).noteIds || []) {
+        await AuditService.record({
+          actorId: userId,
+          action: action === "trash" ? "item_trashed" : "item_moved",
+          noteId,
+          collectionId: action === "move" ? collectionId ?? null : null,
+          req,
+        });
+      }
       res.json(result);
     } catch (error: any) {
       console.error("Error updating notes:", error);
@@ -398,6 +460,18 @@ export default class NoteController {
         expiresAt,
       );
 
+      for (const share of result.shared) {
+        if (!share) continue;
+        await AuditService.record({
+          actorId: userId,
+          action: "item_shared",
+          noteId,
+          targetUserId: share.sharedWithUserId,
+          details: { permission: share.permission, expiresAt: share.expiresAt ?? null },
+          req,
+        });
+      }
+
       if (!result.shared.length && result.failed.length) {
         return res.status(400).json({
           message: result.failed.map((f) => f.message).join("; "),
@@ -457,12 +531,102 @@ export default class NoteController {
       }
 
       await NoteService.revokeShare(noteId, userId, targetUserId);
+      await AuditService.record({
+        actorId: userId,
+        action: "item_share_revoked",
+        noteId,
+        targetUserId,
+        req,
+      });
       res.json({ message: "Share revoked successfully" });
     } catch (error: any) {
       console.error("Error revoking share:", error);
       res
         .status(error.status || 500)
         .json({ message: error.message || "Error revoking share" });
+    }
+  };
+
+  // Remove an item someone shared with you from your list
+  static leaveShare = async (req: any, res: Response) => {
+    try {
+      const userId = req.user?.id;
+      const noteId = parseInt(req.params.id);
+      if (!userId) return res.status(401).json({ message: "Unauthorized" });
+      if (isNaN(noteId)) return res.status(400).json({ message: "Invalid note ID" });
+
+      const result = await NoteService.leaveShare(noteId, userId);
+      if (result.removed) {
+        await AuditService.record({
+          actorId: userId,
+          action: "item_share_left",
+          noteId,
+          targetUserId: result.ownerId,
+          req,
+        });
+        const me = await User.findByPk(userId, { attributes: ["username", "fullName"] });
+        await NotificationService.create(
+          result.ownerId,
+          `${me?.fullName || me?.username || "Someone"} removed "${result.title}" from their list`,
+          noteId
+        );
+      }
+      res.json({ removed: result.removed, collections: result.collections });
+    } catch (error: any) {
+      if (error?.status) {
+        return res.status(error.status).json({ message: error.message });
+      }
+      console.error("Error leaving share:", error);
+      res.status(500).json({ message: "Error removing the item" });
+    }
+  };
+
+  // The vault app reports when a secret field is shown or copied
+  static recordEvent = async (req: any, res: Response) => {
+    try {
+      const userId = req.user?.id;
+      const noteId = parseInt(req.params.id);
+      const action = req.body?.action;
+      const field = String(req.body?.field || "").trim().slice(0, 100);
+      if (!userId) return res.status(401).json({ message: "Unauthorized" });
+      if (isNaN(noteId) || (action !== "field_revealed" && action !== "field_copied")) {
+        return res.status(400).json({ message: "Invalid event" });
+      }
+      const access = await NoteService.getNoteAccess(noteId, userId);
+      if (!access) return res.status(404).json({ message: "Note not found" });
+
+      await AuditService.record({
+        actorId: userId,
+        action,
+        noteId,
+        details: field ? { field } : {},
+        req,
+      });
+      res.status(204).end();
+    } catch (error) {
+      console.error("Error recording event:", error);
+      res.status(500).json({ message: "Error recording event" });
+    }
+  };
+
+  // History of one item (owner, or company owners/admins)
+  static activity = async (req: any, res: Response) => {
+    try {
+      const userId = req.user?.id;
+      const noteId = parseInt(req.params.id);
+      if (!userId) return res.status(401).json({ message: "Unauthorized" });
+      if (isNaN(noteId)) return res.status(400).json({ message: "Invalid note ID" });
+      const before = parseInt(String(req.query.before || ""));
+      const page = await AuditService.noteHistory(
+        noteId,
+        userId,
+        isNaN(before) ? undefined : before
+      );
+      if (!page) return res.status(404).json({ message: "Note not found" });
+      res.json(page);
+    } catch (error) {
+      console.error("Error loading activity:", error);
+      res.status(500).json({ message: "Error loading activity" });
     }
   };
 }

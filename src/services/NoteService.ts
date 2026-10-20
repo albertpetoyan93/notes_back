@@ -411,6 +411,9 @@ class NoteService {
       ? new Map<number, { weak: boolean; reused: boolean; stale: boolean }>()
       : await this.passwordHealthByNoteId(userId);
 
+    const shareCounts = await this.activeShareCounts(
+      notes.filter((note) => note.userId === userId).map((note) => note.id)
+    );
     const search = String(filters?.search || "").trim().toLowerCase();
     return notes
       .map((note) => {
@@ -422,7 +425,9 @@ class NoteService {
           collectionsByNoteId.get(note.id)
         );
         const passwordHealth = passwordHealthById.get(note.id);
-        return passwordHealth ? { ...annotated, passwordHealth } : annotated;
+        const shareCount = shareCounts.get(note.id) || 0;
+        const withShares = annotated.isOwner ? { ...annotated, shareCount } : annotated;
+        return passwordHealth ? { ...withShares, passwordHealth } : withShares;
       })
       .filter((note) => !search || this.matchesSearch(note, search));
   }
@@ -1055,7 +1060,11 @@ class NoteService {
       for (const note of editable) {
         await note.destroy();
       }
-      return { updated: editable.length, skipped: ids.length - editable.length };
+      return {
+        updated: editable.length,
+        skipped: ids.length - editable.length,
+        noteIds: editable.map((note) => note.id),
+      };
     }
 
     const nextIds: number[] = [];
@@ -1479,6 +1488,75 @@ class NoteService {
     }
 
     return true;
+  }
+
+  /**
+   * Someone shared an item with you and you no longer want it: drop your own
+   * share. If it also reaches you through a shared collection, those
+   * collections are returned so you can leave them too.
+   */
+  async leaveShare(noteId: number, userId: number) {
+    const note = await Note.findByPk(noteId, { attributes: ["id", "userId", "title"] });
+    if (!note) {
+      throw Object.assign(new Error("Item not found"), { status: 404 });
+    }
+    if (note.userId === userId) {
+      throw Object.assign(new Error("This is your own item. Move it to Trash instead."), {
+        status: 400,
+      });
+    }
+
+    const linked = (await CollectionService.collectionsByNoteId([noteId])).get(noteId) || [];
+    if (linked.some((collection) => collection.companyId)) {
+      throw Object.assign(
+        new Error("Company items follow your access in the company. Ask a company admin."),
+        { status: 400 }
+      );
+    }
+
+    const removed = await NoteShare.destroy({
+      where: { noteId, sharedWithUserId: userId },
+    });
+
+    const viaCollections = linked.length
+      ? await CollectionShare.findAll({
+          where: this.activeShareFilter({
+            sharedWithUserId: userId,
+            collectionId: { [Op.in]: linked.map((collection) => collection.id) },
+          }),
+          attributes: ["collectionId"],
+        })
+      : [];
+    const collections = linked
+      .filter((collection) =>
+        viaCollections.some((share) => share.collectionId === collection.id)
+      )
+      .map((collection) => ({ id: collection.id, name: collection.name }));
+
+    if (!removed && !collections.length) {
+      throw Object.assign(new Error("This item is not shared with you"), { status: 404 });
+    }
+
+    return {
+      removed: removed > 0,
+      collections,
+      title: note.title,
+      ownerId: note.userId,
+    };
+  }
+
+  /** How many people each item is shared with directly (unexpired). */
+  private async activeShareCounts(noteIds: number[]) {
+    const counts = new Map<number, number>();
+    if (!noteIds.length) return counts;
+    const shares = await NoteShare.findAll({
+      where: this.activeShareFilter({ noteId: { [Op.in]: noteIds } }),
+      attributes: ["noteId"],
+    });
+    for (const share of shares) {
+      counts.set(share.noteId, (counts.get(share.noteId) || 0) + 1);
+    }
+    return counts;
   }
 }
 

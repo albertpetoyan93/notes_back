@@ -19,16 +19,17 @@ Effort: **S** = a day or less, **M** = a few days, **L** = a week or more.
 1. [x] Per-device sessions (fixes random logouts) 🔀 Not merged
 2. [x] Two-factor authentication (TOTP + recovery codes) 🔀 Not merged
 3. [x] Encrypt every item, key checks and key rotation 🔀 Not merged
-4. [ ] Audit log
+4. [x] Audit log, and removing shares from either side 🔀 Not merged
 5. [ ] TOTP codes inside login items
 6. [ ] One-time secret links
 
-### Before steps 1–3 go live
+### Before steps 1–4 go live
 
 - [ ] Merge the branch in all four repos.
 - [ ] Back up the production database, then run `npm run migrate:prod` (migrations
-      `021_create_user_sessions`, `022_add_two_factor`, `023_encrypt_all_notes`). 021 and 022 are
-      done on the local dev database; 023 was tested on a copy of it.
+      `021_create_user_sessions`, `022_add_two_factor`, `023_encrypt_all_notes`,
+      `024_create_audit_events`). 021–023 are done on the local dev database; 024 was tested on a
+      copy of it.
 - [ ] **Before deploying step 3**, copy the encryption block (`ENCRYPTION_KEY`,
       `ENCRYPTION_KEY_ID=2`, `ENCRYPTION_OLD_KEYS=1:…`) from the local `env/production.env` into
       the server's `env/production.env`. The old key was the built-in one from the source code;
@@ -127,12 +128,34 @@ Later (not started):
 - [ ] Rotate the production key (the plan's "Rotate secrets" task) using the steps above.
 - [ ] Each key from a secret manager instead of the env file.
 
-## Step 4: Audit log — M
+## Step 4: Audit log and removing shares (M) [x] 🔀 Not merged
 
-- [ ] `audit_events` table: who, what (view / reveal / copy / edit / share / delete / login / 2FA
-      change), which item, company, IP, user agent, time.
-- [ ] Per-item history and per-company log (admins), with filters.
-- [ ] Offboarding helper: when a member is removed, list everything they could access so it can be rotated.
+Audit log (`audit_events`, migration `024`). Never stores secret values, only field names.
+- [x] Recorded: sign-ins and wrong passwords or 2FA codes; 2FA and recovery-code changes; devices
+      signed out; password resets; items created, edited, trashed, restored, moved; Trash emptied;
+      a secret field revealed or copied (reported by the vault app); a login sent to the browser
+      extension; export and import; item and collection shares, revokes and removals; company
+      invites, removals and role changes.
+- [x] Repeats of the same reveal/copy within a minute count once.
+- [x] Item history (Activity button on an item): the owner, and company owners/admins for company
+      items.
+- [x] Company log (company → Members → Activity log), filter by person: owners and admins.
+- [x] Your own sign-ins and security changes: "Recent account activity" on the Security page.
+- [x] Offboarding: removing a member shows which company collections they could open and which
+      secrets they revealed or copied, so those can be changed.
+
+Removing shares:
+- [x] Owner: "Shared with N people" chip on the item opens the share dialog, where each person can
+      be revoked (this existed; the chip makes it visible).
+- [x] Recipient: "Remove from my list" on an item shared with you. If it reaches you through a
+      shared collection, you are offered to leave that collection. The owner gets a notification.
+- [x] API: `POST /notes/:id/leave`, `POST /collections/:id/leave`.
+
+Later (not started):
+- [ ] A sidebar link to the company log (today: Members → Activity log).
+- [ ] Keep the log for a set time (for example one year), then delete old events.
+- [ ] Export the log as CSV.
+- [ ] Record items opened in the browser extension popup.
 
 ## Step 5: TOTP codes inside login items — M
 

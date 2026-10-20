@@ -793,6 +793,30 @@ class CollectionService {
     return { shared, failed };
   }
 
+  /** Stop seeing a personal collection someone shared with you. */
+  async leave(collectionId: number, userId: number) {
+    const collection = await Collection.findByPk(collectionId);
+    if (!collection) {
+      throw Object.assign(new Error("Collection not found"), { status: 404 });
+    }
+    if (collection.companyId) {
+      throw Object.assign(
+        new Error("Company collections follow your access in the company. Ask a company admin."),
+        { status: 400 }
+      );
+    }
+    if (collection.userId === userId) {
+      throw Object.assign(new Error("You own this collection"), { status: 400 });
+    }
+    const deleted = await CollectionShare.destroy({
+      where: { collectionId, sharedWithUserId: userId },
+    });
+    if (!deleted) {
+      throw Object.assign(new Error("This collection is not shared with you"), { status: 404 });
+    }
+    return { name: collection.name, ownerId: collection.userId };
+  }
+
   async revoke(collectionId: number, ownerId: number, sharedWithUserId: number) {
     const collection = await Collection.findOne({
       where: { id: collectionId, userId: ownerId },

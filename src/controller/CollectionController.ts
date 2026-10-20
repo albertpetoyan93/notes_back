@@ -1,5 +1,8 @@
 import { Response } from "express";
 import CollectionService from "../services/CollectionService";
+import AuditService from "../services/AuditService";
+import NotificationService from "../services/NotificationService";
+import User from "../models/User";
 
 const parseExpiry = (expiresIn: unknown) => {
   if (!expiresIn || expiresIn === "never") return null;
@@ -158,6 +161,17 @@ export default class CollectionController {
         permission || "view",
         expiresAt
       );
+      for (const share of result.shared) {
+        if (!share) continue;
+        await AuditService.record({
+          actorId: userId,
+          action: "collection_shared",
+          collectionId: id,
+          targetUserId: share.sharedWithUserId,
+          details: { permission: share.permission, expiresAt: share.expiresAt ?? null },
+          req,
+        });
+      }
       if (!result.shared.length && result.failed.length) {
         return res.status(400).json({
           message: result.failed.map((item) => item.message).join("; "),
@@ -183,10 +197,48 @@ export default class CollectionController {
       }
       const revoked = await CollectionService.revoke(id, userId, sharedWithUserId);
       if (!revoked) return res.status(404).json({ message: "Share not found" });
+      await AuditService.record({
+        actorId: userId,
+        action: "collection_share_revoked",
+        collectionId: id,
+        targetUserId: sharedWithUserId,
+        req,
+      });
       res.json({ message: "Share revoked" });
     } catch (error) {
       console.error("Error revoking collection share:", error);
       res.status(500).json({ message: "Error revoking share" });
+    }
+  };
+
+  // Stop seeing a collection someone shared with you
+  static leave = async (req: any, res: Response) => {
+    try {
+      const userId = req.user?.id;
+      const id = parseInt(req.params.id);
+      if (!userId) return res.status(401).json({ message: "Unauthorized" });
+      if (isNaN(id)) return res.status(400).json({ message: "Invalid collection ID" });
+      const result = await CollectionService.leave(id, userId);
+      await AuditService.record({
+        actorId: userId,
+        action: "collection_left",
+        collectionId: id,
+        targetUserId: result.ownerId,
+        req,
+      });
+      const me = await User.findByPk(userId, { attributes: ["username", "fullName"] });
+      await NotificationService.create(
+        result.ownerId,
+        `${me?.fullName || me?.username || "Someone"} left the collection "${result.name}"`,
+        undefined
+      );
+      res.json({ ok: true });
+    } catch (error: any) {
+      if (error?.status) {
+        return res.status(error.status).json({ message: error.message });
+      }
+      console.error("Error leaving collection:", error);
+      res.status(500).json({ message: "Error leaving the collection" });
     }
   };
 }

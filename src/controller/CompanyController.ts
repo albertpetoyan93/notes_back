@@ -1,5 +1,7 @@
 import { Response } from "express";
 import CompanyService from "../services/CompanyService";
+import AuditService from "../services/AuditService";
+import CompanyMember from "../models/CompanyMember";
 import CollectionService from "../services/CollectionService";
 
 export default class CompanyController {
@@ -51,9 +53,22 @@ export default class CompanyController {
       if (isNaN(companyId) || isNaN(memberId)) {
         return res.status(400).json({ message: "Invalid company" });
       }
-      res.json(
-        await CompanyService.updateMemberRole(companyId, userId, memberId, req.body?.role || "")
+      const updated = await CompanyService.updateMemberRole(
+        companyId,
+        userId,
+        memberId,
+        req.body?.role || ""
       );
+      const member = await CompanyMember.findByPk(memberId);
+      await AuditService.record({
+        actorId: userId,
+        action: "member_role_changed",
+        companyId,
+        targetUserId: member?.userId ?? null,
+        details: { email: member?.email, role: req.body?.role || "" },
+        req,
+      });
+      res.json(updated);
     } catch (error: any) {
       res.status(error.status || 500).json({
         message: error.status ? error.message : "Error updating member",
@@ -70,7 +85,17 @@ export default class CompanyController {
       if (isNaN(companyId) || isNaN(memberId)) {
         return res.status(400).json({ message: "Invalid company" });
       }
-      res.json(await CompanyService.removeMember(companyId, userId, memberId));
+      const member = await CompanyMember.findByPk(memberId);
+      const result = await CompanyService.removeMember(companyId, userId, memberId);
+      await AuditService.record({
+        actorId: userId,
+        action: "member_removed",
+        companyId,
+        targetUserId: member?.userId ?? null,
+        details: { email: member?.email, role: member?.role },
+        req,
+      });
+      res.json(result);
     } catch (error: any) {
       res.status(error.status || 500).json({
         message: error.status ? error.message : "Error removing member",
@@ -106,16 +131,27 @@ export default class CompanyController {
         : req.body?.email
           ? [req.body.email]
           : [];
-      res.json(
-        await CollectionService.shareCompanyCollection(
-          companyId,
-          collectionId,
-          userId,
-          req.body?.audience || "",
-          req.body?.permission || "view",
-          emails
-        )
+      const shared = await CollectionService.shareCompanyCollection(
+        companyId,
+        collectionId,
+        userId,
+        req.body?.audience || "",
+        req.body?.permission || "view",
+        emails
       );
+      await AuditService.record({
+        actorId: userId,
+        action: "collection_shared",
+        companyId,
+        collectionId,
+        details: {
+          audience: req.body?.audience || "",
+          permission: req.body?.permission || "view",
+          people: emails.length || undefined,
+        },
+        req,
+      });
+      res.json(shared);
     } catch (error: any) {
       res.status(error.status || 500).json({
         message: error.status ? error.message : "Error sharing collection",
@@ -133,12 +169,23 @@ export default class CompanyController {
         return res.status(400).json({ message: "Invalid company" });
       }
       const memberUserId = req.query.userId ? parseInt(String(req.query.userId), 10) : undefined;
-      res.json(
-        await CollectionService.unshareCompanyCollection(companyId, collectionId, userId, {
-          all: req.query.all === "1",
-          memberUserId: memberUserId && !isNaN(memberUserId) ? memberUserId : undefined,
-        })
+      const target = memberUserId && !isNaN(memberUserId) ? memberUserId : undefined;
+      const unshared = await CollectionService.unshareCompanyCollection(
+        companyId,
+        collectionId,
+        userId,
+        { all: req.query.all === "1", memberUserId: target }
       );
+      await AuditService.record({
+        actorId: userId,
+        action: "collection_share_revoked",
+        companyId,
+        collectionId,
+        targetUserId: target ?? null,
+        details: req.query.all === "1" ? { audience: "all" } : {},
+        req,
+      });
+      res.json(unshared);
     } catch (error: any) {
       res.status(error.status || 500).json({
         message: error.status ? error.message : "Error updating the share",
@@ -191,6 +238,13 @@ export default class CompanyController {
         req.body?.email || "",
         req.body?.role || "member"
       );
+      await AuditService.record({
+        actorId: userId,
+        action: "member_invited",
+        companyId,
+        details: { email: req.body?.email || "", role: req.body?.role || "member" },
+        req,
+      });
       res.status(201).json(member);
     } catch (error: any) {
       res.status(error.status || 500).json({
@@ -225,6 +279,55 @@ export default class CompanyController {
       res.status(error.status || 500).json({
         message: error.status ? error.message : "Error declining invite",
       });
+    }
+  };
+
+  // Company log, for owners and admins
+  static activity = async (req: any, res: Response) => {
+    try {
+      const userId = req.user?.id;
+      const companyId = parseInt(req.params.id);
+      if (!userId) return res.status(401).json({ message: "Unauthorized" });
+      if (isNaN(companyId)) return res.status(400).json({ message: "Invalid company" });
+      const before = parseInt(String(req.query.before || ""));
+      const actorId = parseInt(String(req.query.actorId || ""));
+      const page = await AuditService.companyLog(companyId, userId, {
+        before: isNaN(before) ? undefined : before,
+        actorId: isNaN(actorId) ? undefined : actorId,
+        action: req.query.action ? String(req.query.action) : undefined,
+      });
+      if (!page) {
+        return res.status(403).json({ message: "Only owners and admins can see the log" });
+      }
+      res.json(page);
+    } catch (error) {
+      console.error("Error loading company log:", error);
+      res.status(500).json({ message: "Error loading the log" });
+    }
+  };
+
+  // What a member could open and which secrets they looked at (offboarding)
+  static memberAccess = async (req: any, res: Response) => {
+    try {
+      const userId = req.user?.id;
+      const companyId = parseInt(req.params.id);
+      const memberId = parseInt(req.params.memberId);
+      if (!userId) return res.status(401).json({ message: "Unauthorized" });
+      if (isNaN(companyId) || isNaN(memberId)) {
+        return res.status(400).json({ message: "Invalid company" });
+      }
+      const member = await CompanyMember.findOne({ where: { id: memberId, companyId } });
+      if (!member?.userId) {
+        return res.json({ collections: [], secretsAccessed: [] });
+      }
+      const access = await AuditService.memberAccess(companyId, userId, member.userId);
+      if (!access) {
+        return res.status(403).json({ message: "Only owners and admins can see this" });
+      }
+      res.json(access);
+    } catch (error) {
+      console.error("Error loading member access:", error);
+      res.status(500).json({ message: "Error loading member access" });
     }
   };
 }

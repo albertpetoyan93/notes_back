@@ -138,6 +138,7 @@ class CompanyService {
     });
     return rows.map((member) => ({
       id: member.id,
+      userId: member.userId ?? null,
       email: member.email,
       role: member.role,
       status: member.status,

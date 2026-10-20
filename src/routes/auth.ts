@@ -69,6 +69,7 @@ router.post(
   AuthController.revokeOtherSessions as any
 );
 router.delete("/sessions/:id", isAuth, AuthController.revokeSession as any);
+router.get("/activity", isAuth, AuthController.accountActivity as any);
 router.get("/me", isAuth, AuthController.me as any);
 router.get("/users", isAuth, AuthController.searchUsers as any);
 
