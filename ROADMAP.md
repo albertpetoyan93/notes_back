@@ -29,8 +29,13 @@ Effort: **S** = a day or less, **M** = a few days, **L** = a week or more.
 - [ ] Back up the production database, then run `npm run migrate:prod` (migrations
       `021_create_user_sessions`, `022_add_two_factor`, `023_encrypt_all_notes`). 021 and 022 are
       done on the local dev database; 023 was tested on a copy of it.
-- [ ] Check `ENCRYPTION_KEY` in production is set and is the key the existing data was encrypted
-      with. From step 3 the server refuses to start without it.
+- [ ] **Before deploying step 3**, copy the encryption block (`ENCRYPTION_KEY`,
+      `ENCRYPTION_KEY_ID=2`, `ENCRYPTION_OLD_KEYS=1:…`) from the local `env/production.env` into
+      the server's `env/production.env`. The old key was the built-in one from the source code;
+      production now refuses to start with it as the current key. Keep a copy of the new key in a
+      password manager: without it the data cannot be decrypted.
+- [ ] After `migrate:prod` reports no failures, remove `ENCRYPTION_OLD_KEYS` on the server and
+      restart.
 - [ ] Publish extension version 1.2.0 to the Chrome store.
 
 ---
