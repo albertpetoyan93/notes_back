@@ -428,6 +428,7 @@ class NoteService {
         .map((note) => note.id),
       managedCompanies
     );
+    const directIds = await this.directlySharedIds(userId, notes.map((note) => note.id));
     const search = String(filters?.search || "").trim().toLowerCase();
     return notes
       .map((note) => {
@@ -442,7 +443,10 @@ class NoteService {
         const accessCount = accessCounts.get(note.id);
         const withAccess =
           accessCount === undefined ? annotated : { ...annotated, accessCount };
-        return passwordHealth ? { ...withAccess, passwordHealth } : withAccess;
+        const withDirect = annotated.isOwner
+          ? withAccess
+          : { ...withAccess, sharedDirectly: directIds.has(note.id) };
+        return passwordHealth ? { ...withDirect, passwordHealth } : withDirect;
       })
       .filter((note) => !search || this.matchesSearch(note, search));
   }
@@ -488,13 +492,32 @@ class NoteService {
     const collections = await CollectionService.collectionsByNoteId([
       access.note.id,
     ]);
-    return this.annotateNote(
+    const annotated = this.annotateNote(
       access.note,
       userId,
       permissionByNoteId,
       favoriteNoteIds,
       collections.get(access.note.id)
     );
+    if (annotated.isOwner) return annotated;
+    const directIds = await this.directlySharedIds(userId, [access.note.id]);
+    return { ...annotated, sharedDirectly: directIds.has(access.note.id) };
+  }
+
+  /**
+   * Items someone shared with you one by one (not through a collection).
+   * Only those can be removed from your list on their own.
+   */
+  private async directlySharedIds(userId: number, noteIds: number[]) {
+    if (!noteIds.length) return new Set<number>();
+    const shares = await NoteShare.findAll({
+      where: this.activeShareFilter({
+        sharedWithUserId: userId,
+        noteId: { [Op.in]: noteIds },
+      }),
+      attributes: ["noteId"],
+    });
+    return new Set(shares.map((share) => share.noteId));
   }
 
   /**
