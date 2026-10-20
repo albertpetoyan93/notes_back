@@ -161,11 +161,14 @@ class AuditService {
     });
     if (!note) return null;
     const companyId = await this.companyForNote(noteId);
-    const allowed = companyId
-      ? await this.isManager(companyId, userId)
-      : note.userId === userId;
-    if (!allowed) return null;
-    return this.page({ noteId }, before);
+    if (companyId) {
+      if (!(await this.isManager(companyId, userId))) return null;
+      // Only what happened while the item was in this company.
+      return this.page({ noteId, companyId }, before);
+    }
+    if (note.userId !== userId) return null;
+    // Only the item's personal history, and not other people's IP or browser.
+    return this.page({ noteId, companyId: null }, before, userId);
   }
 
   /** Everything that happened in a company. Owners and admins only. */
@@ -258,7 +261,8 @@ class AuditService {
     return { collections: accessible, secretsAccessed: [...byNote.values()] };
   }
 
-  private async page(where: WhereOptions, before?: number) {
+  /** `viewerId`: hide IP and browser of events done by anyone else. */
+  private async page(where: WhereOptions, before?: number, viewerId?: number) {
     const rows = (await AuditEvent.findAll({
       where: before ? { ...where, id: { [Op.lt]: before } } : where,
       include: [
@@ -269,7 +273,9 @@ class AuditService {
       limit: PAGE_SIZE + 1,
     })) as AuditRow[];
 
-    const events = rows.slice(0, PAGE_SIZE).map((row) => ({
+    const events = rows.slice(0, PAGE_SIZE).map((row) => {
+      const private_ = viewerId !== undefined && row.actorId !== viewerId;
+      return {
       id: row.id,
       action: row.action,
       actorId: row.actorId,
@@ -279,10 +285,11 @@ class AuditService {
       noteId: row.noteId,
       collectionId: row.collectionId,
       details: row.details,
-      ip: row.ip,
-      userAgent: row.userAgent,
+      ip: private_ ? null : row.ip,
+      userAgent: private_ ? null : row.userAgent,
       createdAt: row.createdAt,
-    }));
+      };
+    });
     return {
       events,
       next: rows.length > PAGE_SIZE ? events[events.length - 1].id : null,

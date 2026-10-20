@@ -1077,7 +1077,11 @@ class NoteService {
       await CollectionService.setNoteCollections(note.id, nextIds);
     }
 
-    return { updated: editable.length, skipped: ids.length - editable.length };
+    return {
+      updated: editable.length,
+      skipped: ids.length - editable.length,
+      noteIds: editable.map((note) => note.id),
+    };
   }
 
   /**
