@@ -19,6 +19,17 @@ export async function up() {
       ON "note_favorites" ("noteId", "userId");
   `);
 
+  // Copy the old per-note flag. A new database never had that column.
+  const [rows] = await sequelize.query(`
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = current_schema()
+      AND table_name = 'notes'
+      AND column_name = 'isFavorite'
+    LIMIT 1
+  `);
+  if ((rows as unknown[]).length === 0) return;
+
   await sequelize.query(`
     INSERT INTO "note_favorites" ("noteId", "userId", "createdAt", "updatedAt")
     SELECT id, "userId", NOW(), NOW()
