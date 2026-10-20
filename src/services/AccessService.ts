@@ -40,14 +40,21 @@ export interface AccessPerson {
 type UserRow = Pick<User, "id" | "username" | "email" | "fullName">;
 
 const USER_ATTRIBUTES = ["id", "username", "email", "fullName"];
-const notExpired = { [Op.or]: [{ expiresAt: null }, { expiresAt: { [Op.gt]: new Date() } }] };
+// A function, so "now" is the time of each query, not of server start.
+const notExpired = () => ({
+  [Op.or]: [{ expiresAt: null }, { expiresAt: { [Op.gt]: new Date() } }],
+});
 
 /**
  * Everyone who can open an item, other than its owner, and how. Mirrors the
  * rules in NoteService.getNoteAccess so the list matches what people see.
  */
 class AccessService {
-  async peopleByNote(noteIds: number[]) {
+  /**
+   * `companyScope`: for company items, only count access through these
+   * companies (the ones the caller manages). Personal items ignore it.
+   */
+  async peopleByNote(noteIds: number[], companyScope?: Set<number>) {
     const result = new Map<number, AccessPerson[]>();
     const ids = [...new Set(noteIds)];
     if (!ids.length) return result;
@@ -74,14 +81,14 @@ class AccessService {
     };
 
     const directShares = await NoteShare.findAll({
-      where: { noteId: { [Op.in]: ids }, ...notExpired },
+      where: { noteId: { [Op.in]: ids }, ...notExpired() },
       include: [{ model: User, as: "sharedWith", attributes: USER_ATTRIBUTES }],
     });
     directShares.forEach((share) => remember(share.get("sharedWith") as UserRow));
 
     const collectionShares = collectionIds.length
       ? await CollectionShare.findAll({
-          where: { collectionId: { [Op.in]: collectionIds }, ...notExpired },
+          where: { collectionId: { [Op.in]: collectionIds }, ...notExpired() },
           include: [{ model: User, as: "sharedWith", attributes: USER_ATTRIBUTES }],
         })
       : [];
@@ -136,11 +143,14 @@ class AccessService {
       const noteCollections = (linked.get(noteId) || [])
         .map((item) => collectionById.get(item.id))
         .filter((item): item is Collection => !!item);
-      const companyCollections = noteCollections.filter(
+      const allCompanyCollections = noteCollections.filter(
         (item) => item.companyId && activeCompanyIds.has(item.companyId)
       );
+      const companyCollections = companyScope
+        ? allCompanyCollections.filter((item) => companyScope.has(item.companyId as number))
+        : allCompanyCollections;
 
-      if (companyCollections.length) {
+      if (allCompanyCollections.length) {
         // Company items: membership decides, through each company collection.
         for (const collection of companyCollections) {
           for (const member of members) {
@@ -235,8 +245,8 @@ class AccessService {
   }
 
   /** How many people (besides the owner) can open each item. */
-  async countsByNote(noteIds: number[]) {
-    const people = await this.peopleByNote(noteIds);
+  async countsByNote(noteIds: number[], companyScope?: Set<number>) {
+    const people = await this.peopleByNote(noteIds, companyScope);
     return new Map([...people.entries()].map(([noteId, list]) => [noteId, list.length]));
   }
 }

@@ -4,6 +4,7 @@ import NoteFavorite from "../models/NoteFavorite";
 import User from "../models/User";
 import Collection from "../models/Collection";
 import CollectionShare from "../models/CollectionShare";
+import Company from "../models/Company";
 import CompanyMember from "../models/CompanyMember";
 import EmailService from "./EmailService";
 import NotificationService from "./NotificationService";
@@ -417,12 +418,15 @@ class NoteService {
     const accessCounts = await AccessService.countsByNote(
       notes
         .filter((note) => {
-          const companyId = (collectionsByNoteId.get(note.id) || []).find(
-            (collection) => collection.companyId
-          )?.companyId;
-          return companyId ? managedCompanies.has(companyId) : note.userId === userId;
+          const companyIds = (collectionsByNoteId.get(note.id) || [])
+            .map((collection) => collection.companyId)
+            .filter((id): id is number => !!id);
+          return companyIds.length
+            ? companyIds.some((id) => managedCompanies.has(id))
+            : note.userId === userId;
         })
-        .map((note) => note.id)
+        .map((note) => note.id),
+      managedCompanies
     );
     const search = String(filters?.search || "").trim().toLowerCase();
     return notes
@@ -1570,15 +1574,20 @@ class NoteService {
       include: [{ model: User, as: "user", attributes: ["id", "username", "email", "fullName"] }],
     });
     if (!note) return null;
-    const companyId = (
+    const companyIds = (
       (await CollectionService.collectionsByNoteId([noteId])).get(noteId) || []
-    ).find((collection) => collection.companyId)?.companyId;
-    const allowed = companyId
-      ? (await this.managedCompanyIds(userId)).has(companyId)
-      : note.userId === userId;
+    )
+      .map((collection) => collection.companyId)
+      .filter((id): id is number => !!id);
+    const managed = await this.managedCompanyIds(userId);
+    // Company items: only companies you manage, and only access through them.
+    const scope = new Set(companyIds.filter((id) => managed.has(id)));
+    const allowed = companyIds.length ? scope.size > 0 : note.userId === userId;
     if (!allowed) return null;
+    const companyId = companyIds.length ? [...scope][0] : null;
 
-    const people = (await AccessService.peopleByNote([noteId])).get(noteId) || [];
+    const people =
+      (await AccessService.peopleByNote([noteId], managed)).get(noteId) || [];
     const owner = note.get("user") as User | undefined;
     return {
       owner: owner
@@ -1586,14 +1595,18 @@ class NoteService {
         : null,
       people,
       count: people.length,
-      companyId: companyId ?? null,
+      companyId,
     };
   }
 
+  /** Active companies where you are owner or admin. */
   private async managedCompanyIds(userId: number) {
     const rows = await CompanyMember.findAll({
       where: { userId, status: "active", role: { [Op.in]: ["owner", "admin"] } },
       attributes: ["companyId"],
+      include: [
+        { model: Company, as: "company", attributes: [], where: { status: "active" } },
+      ],
     });
     return new Set(rows.map((row) => row.companyId));
   }
