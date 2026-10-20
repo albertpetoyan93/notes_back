@@ -14,10 +14,20 @@ import sequelize from "../configs/DB/sequelize";
 import { isDecryptionFailure } from "../util/encryption";
 import AccessService from "./AccessService";
 
+// An authenticator (TOTP) key field. Same rule as the vault app (utils/totp.ts).
+// None of these contain "pass", so a key is never taken for a password.
+const TOTP_LABEL = /^(2fa|mfa|totp|otp|authenticator|two[- ]?factor)( (key|secret|code|seed|uri|url|link))?$/i;
+
+function isTotpFieldLabel(label: unknown) {
+  return TOTP_LABEL.test(String(label || "").trim());
+}
+
 // Same rule as the vault app (utils/secretField.ts): these values stay hidden.
 function isSecretFieldLabel(label: unknown) {
   const name = String(label || "").trim().toLowerCase();
-  return name.includes("pass") || name === "cvv" || name === "pin";
+  return (
+    name.includes("pass") || name === "cvv" || name === "pin" || isTotpFieldLabel(name)
+  );
 }
 
 interface NoteFilters {
@@ -779,8 +789,14 @@ class NoteService {
         })
       : [];
 
-    const matches: { id: number; title: string; username: string; password: string }[] =
-      [];
+    const matches: {
+      id: number;
+      title: string;
+      username: string;
+      password: string;
+      // Authenticator key or otpauth:// link; the extension makes the codes.
+      totp: string;
+    }[] = [];
 
     notes.forEach((note) => {
       const content = note.content as any;
@@ -791,12 +807,14 @@ class NoteService {
         : this.noteMatchesHost(note.title, fields, pageHost);
       if (!matched) return;
       const password = this.pickPassword(fields);
-      if (!password) return;
+      const totp = this.pickTotp(fields);
+      if (!password && !totp) return;
       matches.push({
         id: note.id,
         title: note.title,
         username: this.pickUsername(fields),
         password,
+        totp,
       });
     });
 
@@ -904,11 +922,7 @@ class NoteService {
     return [
       title,
       ...fields
-        .filter(
-          (field) =>
-            field?.value &&
-            !(typeof field.label === "string" && /pass/i.test(field.label))
-        )
+        .filter((field) => field?.value && !isSecretFieldLabel(field.label))
         .map((field) => String(field.value)),
     ];
   }
@@ -935,6 +949,13 @@ class NoteService {
       (field) => /password/i.test(field.label) && !/key/i.test(field.label)
     );
     return String((preferred || labeled[0])?.value || "");
+  }
+
+  private pickTotp(fields: any[]) {
+    const field = fields.find(
+      (item) => item?.value && isTotpFieldLabel(item.label) && String(item.value).trim()
+    );
+    return field ? String(field.value).trim() : "";
   }
 
   private pickUsername(fields: any[]) {

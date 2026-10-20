@@ -9,23 +9,22 @@ Status marks:
 - **[x]** done (built and tested)
 - **[~]** partly done: the note after the item says what is missing
 - **[ ]** not started
-- **🔀 Not merged:** the work is on branch `claude/2fa-login-implementation-f1tp22` in all four
-  repos and is not merged into `main` or deployed yet.
+- **🔀 Not merged:** built and tested, but not committed or merged into `main` yet.
 
 Effort: **S** = a day or less, **M** = a few days, **L** = a week or more.
 
 ## Next up
 
-1. [x] Per-device sessions (fixes random logouts) 🔀 Not merged
-2. [x] Two-factor authentication (TOTP + recovery codes) 🔀 Not merged
-3. [x] Encrypt every item, key checks and key rotation 🔀 Not merged
-4. [x] Audit log, and removing shares from either side 🔀 Not merged
-5. [ ] TOTP codes inside login items
+1. [x] Per-device sessions (fixes random logouts)
+2. [x] Two-factor authentication (TOTP + recovery codes)
+3. [x] Encrypt every item, key checks and key rotation
+4. [x] Audit log, and removing shares from either side
+5. [x] TOTP codes inside login items 🔀 Not merged
 6. [ ] One-time secret links
 
 ### Before steps 1–4 go live
 
-- [ ] Merge the branch in all four repos.
+- [x] Merge the branch in all four repos (merged into `main` on 20 Oct 2026).
 - [ ] Back up the production database, then run `npm run migrate:prod` (migrations
       `021_create_user_sessions`, `022_add_two_factor`, `023_encrypt_all_notes`,
       `024_create_audit_events`). 021–023 are done on the local dev database; 024 was tested on a
@@ -37,11 +36,12 @@ Effort: **S** = a day or less, **M** = a few days, **L** = a week or more.
       password manager: without it the data cannot be decrypted.
 - [ ] After `migrate:prod` reports no failures, remove `ENCRYPTION_OLD_KEYS` on the server and
       restart.
-- [ ] Publish extension version 1.2.0 to the Chrome store.
+- [ ] Publish the extension to the Chrome store. Version 1.3.0 includes the 1.2.0 sign-in
+      code step and the step 5 code filling.
 
 ---
 
-## Step 1: Per-device sessions (M) [x] 🔀 Not merged
+## Step 1: Per-device sessions (M) [x]
 
 **Problem:** `users.refreshTokenId` held one value. Signing in on a second device, or two tabs
 refreshing at the same moment, signed the other session out.
@@ -63,7 +63,7 @@ refreshing at the same moment, signed the other session out.
 - [x] Vault app: "Where you're signed in" list on the Security page, with "Sign out" for one
       device or all other devices.
 
-## Step 2: Two-factor authentication (TOTP) (M) [x] 🔀 Not merged
+## Step 2: Two-factor authentication (TOTP) (M) [x]
 
 The code is asked **only when a new session starts** (a password sign-in on a device). A
 background token refresh never asks for it.
@@ -104,7 +104,7 @@ Later options (not started):
 - [ ] Company policy: require 2FA for members.
 - [ ] WebAuthn / passkeys as a second factor.
 
-## Step 3: Encrypt every item (S–M) [x] 🔀 Not merged
+## Step 3: Encrypt every item (S–M) [x]
 
 What was wrong: notes were encrypted correctly (AES-256-GCM, random IV), but only password, login,
 address and card items. SSH keys, DB logins, commands and notes were stored as plain text, and
@@ -128,7 +128,7 @@ Later (not started):
 - [ ] Rotate the production key (the plan's "Rotate secrets" task) using the steps above.
 - [ ] Each key from a secret manager instead of the env file.
 
-## Step 4: Audit log and removing shares (M) [x] 🔀 Not merged
+## Step 4: Audit log and removing shares (M) [x]
 
 Audit log (`audit_events`, migration `024`). Never stores secret values, only field names.
 - [x] Recorded: sign-ins and wrong passwords or 2FA codes; 2FA and recovery-code changes; devices
@@ -157,11 +157,26 @@ Later (not started):
 - [ ] Export the log as CSV.
 - [ ] Record items opened in the browser extension popup.
 
-## Step 5: TOTP codes inside login items — M
+## Step 5: TOTP codes inside login items — M [x] 🔀 Not merged
 
-- [ ] `totp` field type on login items (accept secret or `otpauth://` URI, or scan QR from image).
-- [ ] Live 6-digit code with countdown in item detail; copy button.
-- [ ] Extension autofills the code.
+- [x] Authenticator key field on login items. It takes the text key, an `otpauth://totp/` link, or
+      a QR code image (upload, or paste a screenshot into the field). A field counts as a key when
+      its name is "Authenticator key", "2FA", "TOTP", "OTP", "MFA" or "Two-factor" (optionally
+      followed by key/secret/code) **and** its value is a valid key, so old "2FA" fields holding
+      other notes keep working. New logins start with the field; password-manager imports fill it.
+- [x] Live code with a countdown ring and a copy button in the item detail. Copying is logged in
+      the activity history. The editor shows the current code under the key, so it can be checked
+      against the site.
+- [x] Keys are secret: encrypted like passwords, hidden in the UI, left out of search and of site
+      matching. Codes are made in the browser and extension and never stored or sent.
+- [x] Extension: the fill icon appears on "enter your code" fields (`one-time-code`, OTP/2FA/MFA
+      names, or six one-digit boxes) and fills the current code for the site. Only the digits reach
+      the page; the key stays in the extension's background script. The popup shows each login's
+      code; clicking copies it. Version 1.3.0.
+- Tested: codes match the backend's TOTP and the RFC 6238 test values; QR upload, detail view,
+  activity log, search and the autofill API on a copy of the dev database; the extension's
+  content script on a test page with single, split and named code fields. The extension popup was
+  only built, not tried in the browser.
 
 ## Step 6: One-time secret links — M
 
