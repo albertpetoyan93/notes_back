@@ -90,7 +90,7 @@ const getDatabaseMetrics = async (
       consecutiveFailures: stats.consecutiveFailures,
       averageResponseTime: stats.averageResponseTime,
     };
-  } catch (error) {
+  } catch {
     return {
       status: "unhealthy",
       lastPoll: new Date(0),

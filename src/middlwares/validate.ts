@@ -1,4 +1,4 @@
-import { NextFunction, Response, Request } from "express";
+import { NextFunction, Response } from "express";
 
 const validate =
   (schema: any) => async (req: any, res: Response, next: NextFunction) => {

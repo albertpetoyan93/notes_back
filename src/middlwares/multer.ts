@@ -1,5 +1,4 @@
 // import multer from "multer";
-import { mkdir } from "../util/mkdir";
 
 export const multerMiddleware = () => {
   // return multer({

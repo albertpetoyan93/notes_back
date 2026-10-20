@@ -1,4 +1,3 @@
-/* eslint-disable n/no-process-env */
 
 export default {
   NodeEnv: process.env.NODE_ENV ?? "",

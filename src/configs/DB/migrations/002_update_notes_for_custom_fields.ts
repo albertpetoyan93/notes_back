@@ -1,5 +1,5 @@
 import sequelize from "../sequelize";
-import { QueryInterface, DataTypes } from "sequelize";
+import { QueryInterface } from "sequelize";
 
 /**
  * Migration: Update notes table for custom fields support

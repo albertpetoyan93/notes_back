@@ -47,7 +47,7 @@ if (EnvVars.NodeEnv === NodeEnvs.Production.valueOf()) {
 app.use("/api", indexRouter);
 
 // Add error handler
-app.use((err: any, _: Request, res: Response, next: NextFunction) => {
+app.use((err: any, _: Request, res: Response, _next: NextFunction) => {
   res.status(err.status || 500).json({
     status: err.status || 500,
     message: err.message || "Server error",

@@ -1,4 +1,4 @@
-import { Request, Response, NextFunction, RequestHandler } from "express";
+import { RequestHandler } from "express";
 import HttpStatusCodes from "@src/common/HttpStatusCodes";
 
 const checkRole = (roles: string[]): RequestHandler => {

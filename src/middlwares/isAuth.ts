@@ -41,7 +41,7 @@ const isAuth: RequestHandler = async (
     }
 
     req.user = { id: userId, userId, sessionId: sid };
-  } catch (err) {
+  } catch {
     throw new CustomError(
       "User is not authorized",
       HttpStatusCodes.UNAUTHORIZED

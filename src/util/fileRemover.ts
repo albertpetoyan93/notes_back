@@ -3,7 +3,7 @@
 // import Message from "../models/Message";
 // import CustomError from "./CustomError";
 
-export const fileRemover = async (filePath: string) => {
+export const fileRemover = async (_filePath: string) => {
   try {
     // const message = await Message.update(
     //   { "files.url": filePath },
