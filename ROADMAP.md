@@ -1,62 +1,97 @@
 # Roadmap
 
-Planned features for the notes/vault app (backend: `notes_back`, frontend: `notes_front`).
-We implement them step by step, in the order of the **Next up** list. Tick an item when it is merged.
+Planned features for the vault app. Repos: `notes_back` (API), `notes_front` (vault app),
+`notes_web` (public site), `notes_extension` (browser extension).
+
+We build them one step at a time, in the order of the **Next up** list.
+
+Status marks:
+- **[x]** done (built and tested)
+- **[~]** partly done: the note after the item says what is missing
+- **[ ]** not started
+- **🔀 Not merged:** the work is on branch `claude/2fa-login-implementation-f1tp22` in all four
+  repos and is not merged into `main` or deployed yet.
 
 Effort: **S** = a day or less, **M** = a few days, **L** = a week or more.
 
 ## Next up
 
-1. [ ] Per-device sessions (fixes random logouts)
-2. [ ] Two-factor authentication (TOTP + recovery codes)
+1. [x] Per-device sessions (fixes random logouts) 🔀 Not merged
+2. [x] Two-factor authentication (TOTP + recovery codes) 🔀 Not merged
 3. [ ] Fix note encryption key / IV
 4. [ ] Audit log
 5. [ ] TOTP codes inside login items
 6. [ ] One-time secret links
 
+### Before steps 1 and 2 go live
+
+- [ ] Merge the branch in all four repos.
+- [ ] Run `npm run migrate:prod` (migrations `021_create_user_sessions`, `022_add_two_factor`).
+      Done on the local dev database.
+- [ ] Set `ENCRYPTION_KEY` in production. 2FA secrets are encrypted with it, and without it the
+      code falls back to a key written in the source.
+- [ ] Publish extension version 1.2.0 to the Chrome store.
+
 ---
 
-## Step 1: Per-device sessions — M
+## Step 1: Per-device sessions (M) [x] 🔀 Not merged
 
-**Problem:** `users.refreshTokenId` holds one value, so logging in on a second device (or two tabs
-refreshing at the same moment) invalidates the other session → user gets logged out.
+**Problem:** `users.refreshTokenId` held one value. Signing in on a second device, or two tabs
+refreshing at the same moment, signed the other session out.
 
-- [ ] Migration: `user_sessions` table (`id`, `userId`, `refreshTokenHash`, `previousTokenHash`,
-      `rotatedAt`, `userAgent`, `ip`, `lastUsedAt`, `expiresAt`, `revokedAt`, `kind` = web | extension).
-- [ ] `AuthService.issueSession` / `rotateSession` / `revokeSession` work with the table instead of
+- [x] Migration `021`: `user_sessions` table (`userId`, `kind` = web | extension, `tokenHash`,
+      `previousTokenHash`, `rotatedAt`, `userAgent`, `ip`, `lastUsedAt`, `expiresAt`). Only hashes
+      are stored. Signing out deletes the row.
+- [x] `SessionService` creates, rotates and revokes sessions. `AuthService` uses it in place of
       `users.refreshTokenId` / `extensionRefreshTokenId`.
-- [ ] Short grace window (~30 s) where the previous refresh token is still accepted (multiple tabs).
-- [ ] Password reset / 2FA changes revoke all sessions.
-- [ ] Endpoints: `GET /auth/sessions`, `DELETE /auth/sessions/:id`, `POST /auth/sessions/revoke-all`.
-- [ ] Frontend: "Active devices" list on the Security page.
+- [x] For 30 seconds after a refresh, the previous web refresh token still works, so several tabs
+      can refresh at once. Extension refresh tokens stay single-use.
+- [x] Access tokens carry the session id. `isAuth` rejects them as soon as their session is signed
+      out.
+- [x] Tokens issued before this change are moved into a session on their next refresh, so nobody is
+      signed out by the deploy.
+- [x] A password reset signs out every device. Turning on 2FA signs out every other device.
+- [x] Endpoints: `GET /auth/sessions`, `DELETE /auth/sessions/:id`,
+      `POST /auth/sessions/revoke-others`.
+- [x] Vault app: "Where you're signed in" list on the Security page, with "Sign out" for one
+      device or all other devices.
 
-## Step 2: Two-factor authentication (TOTP) — M
+## Step 2: Two-factor authentication (TOTP) (M) [x] 🔀 Not merged
 
-The 2FA code is asked **only when a new session starts** (password login on a device). Background
-token refresh never asks for it.
+The code is asked **only when a new session starts** (a password sign-in on a device). A
+background token refresh never asks for it.
 
 Backend:
-- [ ] Migration `users`: `twoFactorEnabled` (bool), `twoFactorSecret` (encrypted with
-      `util/encryption.ts`), `twoFactorRecoveryCodes` (JSONB, sha256 hashes), `twoFactorLastStep` (replay guard).
-- [ ] Dependencies: `otplib`, `qrcode` (QR generated server-side as a data URL).
-- [ ] `TwoFactorService`: `setup`, `enable`, `verify` (TOTP ±1 step or recovery code), `disable`
-      (password + code), `regenerateRecoveryCodes`.
-- [ ] `/auth/login` and `/auth/extension/login`: if 2FA is on, return
-      `{ twoFactorRequired, challengeToken }` (JWT `type: "2fa"`, 5 min) instead of a session.
-- [ ] `POST /auth/2fa/verify` and `POST /auth/extension/2fa/verify`, strict rate limit (5 / 15 min).
-- [ ] `isAuth`: accept only `type === "access"` (today it only rejects `refresh`).
-- [ ] Management routes (behind `isAuth`): `GET /auth/2fa/status`, `POST /auth/2fa/setup`,
+- [x] Migration `022` on `users`: `twoFactorEnabled`, `twoFactorSecret` (encrypted with
+      `util/encryption.ts`), `twoFactorRecoveryCodes` (sha256 hashes), `twoFactorLastStep`
+      (blocks reuse of a code).
+- [x] TOTP written in `util/totp.ts` (no new dependency) and checked against the RFC 6238 test
+      vectors.
+- [x] `TwoFactorService`: `setup`, `enable`, `verify` (code from the app, ±1 time step, or a
+      recovery code; each works once), `disable` (password + code), `regenerateRecoveryCodes`.
+- [x] `/auth/login` and `/auth/extension/login` return `{ twoFactorRequired, challengeToken }`
+      (5 minutes) instead of a session.
+- [x] `POST /auth/2fa/verify` and `POST /auth/extension/2fa/verify`. The 2FA endpoints allow
+      10 attempts per 15 minutes.
+- [x] `isAuth` accepts only access tokens. Before, it accepted any token type except refresh.
+- [x] Management routes (behind `isAuth`): `GET /auth/2fa/status`, `POST /auth/2fa/setup`,
       `/enable`, `/disable`, `/recovery-codes`.
-- [ ] Email notification when 2FA is turned on / off. Password reset does **not** disable 2FA.
+- [x] Email when 2FA is turned on or off. A password reset does **not** turn 2FA off.
 
-Frontend:
-- [ ] Login: second step with antd `Input.OTP` (`autoComplete="one-time-code"`), "Use a recovery
-      code" link, "Back" link. `challengeToken` kept in component state only.
-- [ ] `/settings/security` page: enable wizard (QR / manual secret → confirm code → save recovery
-      codes), status, regenerate codes, disable.
-- [ ] Extension direct login handles the 2FA step.
+Vault app (`notes_front`):
+- [x] Sign-in: code step (6 boxes, sends itself when full), "Use a recovery code", "Back to
+      sign in".
+- [x] `/settings/security` (account menu → Security): turn 2FA on (QR code made in the browser, or
+      typing the key in by hand; confirm a code; save 10 recovery codes), new recovery codes, turn
+      off.
 
-Later options:
+Public site (`notes_web`):
+- [x] The sign-in card has the same code step. Typechecked only, not yet tried in a browser.
+
+Extension (`notes_extension`):
+- [x] The popup's sign-in has a code step. Version 1.2.0.
+
+Later options (not started):
 - [ ] "Trust this device for 30 days".
 - [ ] Re-ask the code for sensitive actions (disable 2FA, change email/password, export).
 - [ ] Company policy: require 2FA for members.
@@ -96,10 +131,11 @@ DB dump can decrypt every note.
 ## Backlog
 
 ### Security
-- [ ] Vault health report: weak / reused / old passwords, breach check via HIBP k-anonymity — M
+- [~] Vault health report — M. Weak, reused and old passwords are flagged (Security health in the
+      sidebar). Missing: breach check with HIBP k-anonymity.
 - [ ] Auto-clear clipboard after 30 s (`useFieldClipboard`) — S
 - [ ] Auto-lock after idle time — S
-- [ ] New-device login alerts by email — S
+- [ ] New-device sign-in alerts by email — S (sessions now store device and IP, which this needs)
 - [ ] Company policies: require 2FA, min password strength, block export, session lifetime — M
 
 ### Items
@@ -107,7 +143,8 @@ DB dump can decrypt every note.
 - [ ] Encrypted file attachments (SSH keys, `.env`, certificates) — M
 - [ ] Password age / rotation reminders via notifications — S
 - [ ] Custom item templates per company — M
-- [ ] Tags + search filters (`tag:prod category:ssh`) — S–M
+- [~] Tags + search filters — S–M. Tags and filtering by tag, category and project work. Missing:
+      typed search syntax like `tag:prod category:ssh`.
 - [ ] Generator: passphrases, character sets, strength meter (zxcvbn) — S
 
 ### Sharing and teams
@@ -124,9 +161,12 @@ DB dump can decrypt every note.
 - [ ] SSH agent — L
 
 ### Convenience
-- [ ] Importers: Bitwarden JSON, 1Password `.1pux`, LastPass CSV, Chrome/Firefox CSV, KeePass XML — M
+- [~] Importers — M. In progress in `notes_front` (not committed yet): CSV from Chrome, Firefox,
+      Bitwarden and LastPass. Missing: 1Password `.1pux`, KeePass XML. The app's own backup
+      import/export already works.
 - [ ] Password-protected backup export — S
-- [ ] Extension: save on submit, update changed password, generate in signup forms, autofill cards/addresses — M
+- [x] Extension: save on submit, update a changed password, generate in signup forms, fill cards and
+      addresses — M
 - [ ] Passkey storage — L
 - [ ] PWA / mobile, offline read-only — M–L
 - [ ] Emergency access (trusted contact, auto-grant after N days) — M
