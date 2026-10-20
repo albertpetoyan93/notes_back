@@ -11,6 +11,7 @@ import CollectionService from "./CollectionService";
 import { Op } from "sequelize";
 import sequelize from "../configs/DB/sequelize";
 import { isDecryptionFailure } from "../util/encryption";
+import AccessService from "./AccessService";
 
 // Same rule as the vault app (utils/secretField.ts): these values stay hidden.
 function isSecretFieldLabel(label: unknown) {
@@ -411,8 +412,17 @@ class NoteService {
       ? new Map<number, { weak: boolean; reused: boolean; stale: boolean }>()
       : await this.passwordHealthByNoteId(userId);
 
-    const shareCounts = await this.activeShareCounts(
-      notes.filter((note) => note.userId === userId).map((note) => note.id)
+    // Shown to whoever manages access: the owner, or company owners/admins.
+    const managedCompanies = await this.managedCompanyIds(userId);
+    const accessCounts = await AccessService.countsByNote(
+      notes
+        .filter((note) => {
+          const companyId = (collectionsByNoteId.get(note.id) || []).find(
+            (collection) => collection.companyId
+          )?.companyId;
+          return companyId ? managedCompanies.has(companyId) : note.userId === userId;
+        })
+        .map((note) => note.id)
     );
     const search = String(filters?.search || "").trim().toLowerCase();
     return notes
@@ -425,9 +435,10 @@ class NoteService {
           collectionsByNoteId.get(note.id)
         );
         const passwordHealth = passwordHealthById.get(note.id);
-        const shareCount = shareCounts.get(note.id) || 0;
-        const withShares = annotated.isOwner ? { ...annotated, shareCount } : annotated;
-        return passwordHealth ? { ...withShares, passwordHealth } : withShares;
+        const accessCount = accessCounts.get(note.id);
+        const withAccess =
+          accessCount === undefined ? annotated : { ...annotated, accessCount };
+        return passwordHealth ? { ...withAccess, passwordHealth } : withAccess;
       })
       .filter((note) => !search || this.matchesSearch(note, search));
   }
@@ -1549,18 +1560,42 @@ class NoteService {
     };
   }
 
-  /** How many people each item is shared with directly (unexpired). */
-  private async activeShareCounts(noteIds: number[]) {
-    const counts = new Map<number, number>();
-    if (!noteIds.length) return counts;
-    const shares = await NoteShare.findAll({
-      where: this.activeShareFilter({ noteId: { [Op.in]: noteIds } }),
-      attributes: ["noteId"],
+  /**
+   * Everyone who can open an item and how. For the item's owner, or company
+   * owners/admins when it is a company item.
+   */
+  async getAccessList(noteId: number, userId: number) {
+    const note = await Note.findByPk(noteId, {
+      attributes: ["id", "userId"],
+      include: [{ model: User, as: "user", attributes: ["id", "username", "email", "fullName"] }],
     });
-    for (const share of shares) {
-      counts.set(share.noteId, (counts.get(share.noteId) || 0) + 1);
-    }
-    return counts;
+    if (!note) return null;
+    const companyId = (
+      (await CollectionService.collectionsByNoteId([noteId])).get(noteId) || []
+    ).find((collection) => collection.companyId)?.companyId;
+    const allowed = companyId
+      ? (await this.managedCompanyIds(userId)).has(companyId)
+      : note.userId === userId;
+    if (!allowed) return null;
+
+    const people = (await AccessService.peopleByNote([noteId])).get(noteId) || [];
+    const owner = note.get("user") as User | undefined;
+    return {
+      owner: owner
+        ? { userId: owner.id, name: owner.fullName || owner.username, email: owner.email }
+        : null,
+      people,
+      count: people.length,
+      companyId: companyId ?? null,
+    };
+  }
+
+  private async managedCompanyIds(userId: number) {
+    const rows = await CompanyMember.findAll({
+      where: { userId, status: "active", role: { [Op.in]: ["owner", "admin"] } },
+      attributes: ["companyId"],
+    });
+    return new Set(rows.map((row) => row.companyId));
   }
 }
 

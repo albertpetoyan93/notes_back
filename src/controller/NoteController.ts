@@ -609,6 +609,22 @@ export default class NoteController {
     }
   };
 
+  // Everyone who can open an item, and how (owner, or company owners/admins)
+  static accessList = async (req: any, res: Response) => {
+    try {
+      const userId = req.user?.id;
+      const noteId = parseInt(req.params.id);
+      if (!userId) return res.status(401).json({ message: "Unauthorized" });
+      if (isNaN(noteId)) return res.status(400).json({ message: "Invalid note ID" });
+      const access = await NoteService.getAccessList(noteId, userId);
+      if (!access) return res.status(404).json({ message: "Note not found" });
+      res.json(access);
+    } catch (error) {
+      console.error("Error loading access:", error);
+      res.status(500).json({ message: "Error loading who has access" });
+    }
+  };
+
   // History of one item (owner, or company owners/admins)
   static activity = async (req: any, res: Response) => {
     try {

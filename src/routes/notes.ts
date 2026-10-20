@@ -33,6 +33,7 @@ router.delete(
 // Leave an item someone shared with you; history; secret reveal/copy events
 router.post("/:id/leave", NoteController.leaveShare as RequestHandler);
 router.get("/:id/activity", NoteController.activity as RequestHandler);
+router.get("/:id/access", NoteController.accessList as RequestHandler);
 router.post("/:id/events", NoteController.recordEvent as RequestHandler);
 
 // Get a single note
