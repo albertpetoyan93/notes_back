@@ -36,6 +36,8 @@ function remove(loc: string): Promise<void> {
  * Copy file.
  */
 function copy(src: string, dest: string): Promise<void> {
+  // Git drops empty folders (src/public), so a fresh checkout may not have one.
+  if (!fs.existsSync(src)) return Promise.resolve();
   return new Promise((res, rej) => {
     return fs.copy(src, dest, (err) => {
       return !!err ? rej(err) : res();

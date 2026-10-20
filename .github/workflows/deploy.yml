@@ -32,8 +32,13 @@ jobs:
       - name: Install
         run: npm ci --no-audit --no-fund
 
+      # ts-node loads preload.js, which requires an env file. The build reads no
+      # env values, and the real env files are gitignored, so an empty one will do.
       - name: Build
-        run: npm run build
+        run: |
+          mkdir -p env
+          touch env/development.env
+          npm run build
 
       # Only what runs in production: compiled code (migrations included),
       # the files that start it, and the lock file for production dependencies.
