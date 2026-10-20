@@ -1,6 +1,10 @@
 import { DataTypes, Model, Optional } from "sequelize";
 import sequelize from "../configs/DB/sequelize";
-import { encryptContent, decryptContent } from "../util/encryption";
+import {
+  decryptContent,
+  encryptContent,
+  isDecryptionFailure,
+} from "../util/encryption";
 
 interface NoteAttributes {
   id: number;
@@ -139,29 +143,28 @@ Note.init(
     timestamps: true,
     paranoid: true,
     hooks: {
-      // Auto-enable encryption for password and login categories
+      // Every item is encrypted at rest; SSH keys and DB logins are as secret as passwords.
       beforeValidate: async (note: Note) => {
-        if (
-          note.category === "password" ||
-          note.category === "login" ||
-          note.category === "address" ||
-          note.category === "card"
-        ) {
-          note.isEncrypted = true;
-        }
+        note.isEncrypted = true;
       },
       // Encrypt before saving to database
       beforeCreate: async (note: Note) => {
-        if (note.isEncrypted && note.content) {
-          const encrypted = encryptContent(note.content);
-          note.setDataValue("content", encrypted);
+        if (isDecryptionFailure(note.content)) {
+          throw new Error("Content could not be decrypted");
+        }
+        if (note.content) {
+          note.setDataValue("content", encryptContent(note.content));
         }
       },
       beforeUpdate: async (note: Note) => {
-        if (note.isEncrypted && note.changed("content")) {
-          const encrypted = encryptContent(note.content);
-          note.setDataValue("content", encrypted);
+        if (!note.changed("content")) return;
+        // afterFind put a placeholder here because decryption failed. Keep the
+        // stored ciphertext so saving other fields cannot wipe the item.
+        if (isDecryptionFailure(note.content)) {
+          note.setDataValue("content", note.previous("content") as any);
+          return;
         }
+        note.setDataValue("content", encryptContent(note.content));
       },
       // Decrypt after retrieving from database
       afterFind: (result: Note | Note[] | null) => {

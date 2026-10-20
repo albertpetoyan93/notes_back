@@ -5,6 +5,7 @@ import sequelize from "./configs/DB/sequelize";
 import app from "./server";
 import socketService from "./services/SocketManager";
 import initializeDatabase from "./configs/DB/init";
+import { assertEncryptionReady } from "./util/encryption";
 
 // **** Run **** //
 
@@ -18,6 +19,9 @@ socketService.initialize(server);
 
 async function start() {
   try {
+    // Refuse to start without a usable ENCRYPTION_KEY in production.
+    assertEncryptionReady();
+
     // Initialize database (setup associations and test connection)
     await initializeDatabase();
 

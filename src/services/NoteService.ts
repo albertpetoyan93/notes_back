@@ -10,6 +10,13 @@ import NotificationService from "./NotificationService";
 import CollectionService from "./CollectionService";
 import { Op } from "sequelize";
 import sequelize from "../configs/DB/sequelize";
+import { isDecryptionFailure } from "../util/encryption";
+
+// Same rule as the vault app (utils/secretField.ts): these values stay hidden.
+function isSecretFieldLabel(label: unknown) {
+  const name = String(label || "").trim().toLowerCase();
+  return name.includes("pass") || name === "cvv" || name === "pin";
+}
 
 interface NoteFilters {
   category?: string;
@@ -382,22 +389,8 @@ class NoteService {
       );
     }
 
-    if (filters?.search) {
-      const searchTerm = `%${filters.search}%`;
-      andClauses.push({
-        [Op.or]: [
-          { title: { [Op.iLike]: searchTerm } },
-          { project: { [Op.iLike]: searchTerm } },
-          { "$collection.name$": { [Op.iLike]: searchTerm } },
-          sequelize.where(sequelize.cast(sequelize.col("tags"), "text"), {
-            [Op.iLike]: searchTerm,
-          }),
-          sequelize.where(sequelize.cast(sequelize.col("content"), "text"), {
-            [Op.iLike]: searchTerm,
-          }),
-        ],
-      });
-    }
+    // Search runs after decryption (see matchesSearch): content is encrypted
+    // in the database, so SQL cannot look inside it.
 
     if (andClauses.length) {
       whereClause[Op.and] = andClauses;
@@ -418,17 +411,49 @@ class NoteService {
       ? new Map<number, { weak: boolean; reused: boolean; stale: boolean }>()
       : await this.passwordHealthByNoteId(userId);
 
-    return notes.map((note) => {
-      const annotated = this.annotateNote(
-        note,
-        userId,
-        permissionByNoteId,
-        favoriteNoteIds,
-        collectionsByNoteId.get(note.id)
-      );
-      const passwordHealth = passwordHealthById.get(note.id);
-      return passwordHealth ? { ...annotated, passwordHealth } : annotated;
-    });
+    const search = String(filters?.search || "").trim().toLowerCase();
+    return notes
+      .map((note) => {
+        const annotated = this.annotateNote(
+          note,
+          userId,
+          permissionByNoteId,
+          favoriteNoteIds,
+          collectionsByNoteId.get(note.id)
+        );
+        const passwordHealth = passwordHealthById.get(note.id);
+        return passwordHealth ? { ...annotated, passwordHealth } : annotated;
+      })
+      .filter((note) => !search || this.matchesSearch(note, search));
+  }
+
+  /**
+   * Title, project, collections, tags and content. Values of password-type
+   * fields are left out so search cannot be used to guess a secret.
+   */
+  private matchesSearch(note: any, search: string) {
+    const content = note.content;
+    const parts: unknown[] = [
+      note.title,
+      note.project,
+      ...(note.collections || []).map((item: any) => item?.name),
+      ...(Array.isArray(note.tags) ? note.tags : []),
+    ];
+    if (typeof content === "string") {
+      parts.push(content);
+    } else if (content && !isDecryptionFailure(content)) {
+      parts.push(content.mainContent);
+      for (const field of Array.isArray(content.customFields)
+        ? content.customFields
+        : []) {
+        parts.push(field?.label);
+        if (!isSecretFieldLabel(field?.label)) parts.push(field?.value);
+      }
+    }
+    return parts.some(
+      (part) =>
+        typeof part === "string" && part.toLowerCase().includes(search)
+    );
   }
 
   /**
@@ -642,6 +667,13 @@ class NoteService {
     }
 
     const note = access.note;
+    // Editing would replace data we could not read with whatever the form held.
+    if (data.content !== undefined && isDecryptionFailure(note.content)) {
+      throw Object.assign(
+        new Error("This item could not be decrypted, so it cannot be edited."),
+        { status: 409 }
+      );
+    }
     const payload: any = {
       title: data.title !== undefined ? data.title : note.title,
       content: data.content !== undefined ? data.content : note.content,

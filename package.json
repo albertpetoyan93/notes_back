@@ -8,7 +8,9 @@
     "dev": "nodemon --exec \"npm run dev:hot\" --watch ./src -e ts",
     "start": "node start-prod.js",
     "migrate:prod": "cross-env NODE_ENV=production npx ts-node -r module-alias/register ./src/configs/DB/migrate.ts",
-    "migrate:dev": "cross-env NODE_ENV=development npx ts-node -r module-alias/register ./src/configs/DB/migrate.ts"
+    "migrate:dev": "cross-env NODE_ENV=development npx ts-node -r module-alias/register ./src/configs/DB/migrate.ts",
+    "reencrypt:prod": "cross-env NODE_ENV=production npx ts-node -r module-alias/register ./src/scripts/reencrypt.ts",
+    "reencrypt:dev": "cross-env NODE_ENV=development npx ts-node -r module-alias/register ./src/scripts/reencrypt.ts"
   },
   "engines": {
     "node": ">=16.0.0"

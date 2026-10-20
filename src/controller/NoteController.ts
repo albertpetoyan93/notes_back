@@ -220,7 +220,10 @@ export default class NoteController {
       }
 
       res.json(note);
-    } catch (error) {
+    } catch (error: any) {
+      if (error?.status === 409) {
+        return res.status(409).json({ message: error.message });
+      }
       console.error("Error updating note:", error);
       res.status(500).json({ message: "Error updating note" });
     }

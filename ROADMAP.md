@@ -18,18 +18,19 @@ Effort: **S** = a day or less, **M** = a few days, **L** = a week or more.
 
 1. [x] Per-device sessions (fixes random logouts) 🔀 Not merged
 2. [x] Two-factor authentication (TOTP + recovery codes) 🔀 Not merged
-3. [ ] Fix note encryption key / IV
+3. [x] Encrypt every item, key checks and key rotation 🔀 Not merged
 4. [ ] Audit log
 5. [ ] TOTP codes inside login items
 6. [ ] One-time secret links
 
-### Before steps 1 and 2 go live
+### Before steps 1–3 go live
 
 - [ ] Merge the branch in all four repos.
-- [ ] Run `npm run migrate:prod` (migrations `021_create_user_sessions`, `022_add_two_factor`).
-      Done on the local dev database.
-- [ ] Set `ENCRYPTION_KEY` in production. 2FA secrets are encrypted with it, and without it the
-      code falls back to a key written in the source.
+- [ ] Back up the production database, then run `npm run migrate:prod` (migrations
+      `021_create_user_sessions`, `022_add_two_factor`, `023_encrypt_all_notes`). 021 and 022 are
+      done on the local dev database; 023 was tested on a copy of it.
+- [ ] Check `ENCRYPTION_KEY` in production is set and is the key the existing data was encrypted
+      with. From step 3 the server refuses to start without it.
 - [ ] Publish extension version 1.2.0 to the Chrome store.
 
 ---
@@ -97,15 +98,29 @@ Later options (not started):
 - [ ] Company policy: require 2FA for members.
 - [ ] WebAuthn / passkeys as a second factor.
 
-## Step 3: Fix note encryption — S–M
+## Step 3: Encrypt every item (S–M) [x] 🔀 Not merged
 
-`src/util/crypto.ts` uses a hard-coded key and a fixed IV (AES-128-CBC). Anyone with the repo and a
-DB dump can decrypt every note.
+What was wrong: notes were encrypted correctly (AES-256-GCM, random IV), but only password, login,
+address and card items. SSH keys, DB logins, commands and notes were stored as plain text, and
+some older password items too. (`util/crypto.ts`, with its hard-coded key, was not used anywhere.)
 
-- [ ] Encrypt notes with AES-256-GCM, key from env (`ENCRYPTION_KEY`, required in production — no
-      fallback), random IV per value.
-- [ ] Version prefix on ciphertext (e.g. `v2:`) so old and new formats can coexist.
-- [ ] Migration script that re-encrypts existing notes.
+- [x] Every item is encrypted when saved, whatever its category. The vault app's "Encrypt content"
+      switch is gone.
+- [x] Migration `023`: encrypts everything stored as plain text and rewrites older values in the new
+      format. Tested on a copy of the dev database: 36 items, all decrypt to exactly what they were.
+- [x] Stored values carry a key id (`v2:<keyId>:…`). Values without one still decrypt.
+- [x] The server refuses to start in production without `ENCRYPTION_KEY` (no fallback key).
+- [x] Changing the key: set a new `ENCRYPTION_KEY` and `ENCRYPTION_KEY_ID`, put the old key in
+      `ENCRYPTION_OLD_KEYS`, run `npm run reencrypt:prod`, then remove the old key. 2FA secrets are
+      included. Steps are in `src/scripts/reencrypt.ts`.
+- [x] An item that cannot be decrypted can no longer be wiped: editing its content is refused
+      (409), and saving other fields keeps the stored data.
+- [x] Search looks inside content after decryption. Password, PIN and CVV values are not searched.
+- [x] Removed unused `util/crypto.ts`.
+
+Later (not started):
+- [ ] Rotate the production key (the plan's "Rotate secrets" task) using the steps above.
+- [ ] Each key from a secret manager instead of the env file.
 
 ## Step 4: Audit log — M
 
