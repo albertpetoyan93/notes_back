@@ -22,11 +22,18 @@ function isTotpFieldLabel(label: unknown) {
   return TOTP_LABEL.test(String(label || "").trim());
 }
 
+// Recovery (backup) codes for a site. Same rule as utils/recoveryCodes.ts.
+const RECOVERY_LABEL = /^((2fa|mfa|two[- ]?factor) )?(recovery|backup)( codes?| keys?)?$/i;
+
 // Same rule as the vault app (utils/secretField.ts): these values stay hidden.
 function isSecretFieldLabel(label: unknown) {
   const name = String(label || "").trim().toLowerCase();
   return (
-    name.includes("pass") || name === "cvv" || name === "pin" || isTotpFieldLabel(name)
+    name.includes("pass") ||
+    name === "cvv" ||
+    name === "pin" ||
+    isTotpFieldLabel(name) ||
+    RECOVERY_LABEL.test(name)
   );
 }
 

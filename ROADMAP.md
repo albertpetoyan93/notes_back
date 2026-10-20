@@ -173,6 +173,10 @@ Later (not started):
       names, or six one-digit boxes) and fills the current code for the site. Only the digits reach
       the page; the key stays in the extension's background script. The popup shows each login's
       code; clicking copies it. Version 1.3.0.
+- [x] Recovery codes field on login items: paste the list or load the site's `.txt` file (read
+      in the browser, not uploaded). The detail view shows how many are left and, when shown, each
+      code with copy and "Mark as used". Hidden, encrypted, left out of search; revealing and
+      copying are logged.
 - Tested: codes match the backend's TOTP and the RFC 6238 test values; QR upload, detail view,
   activity log, search and the autofill API on a copy of the dev database; the extension's
   content script on a test page with single, split and named code fields. The extension popup was
