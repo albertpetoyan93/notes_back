@@ -8,6 +8,7 @@ import CompanyMember from "../models/CompanyMember";
 import Note from "../models/Note";
 import User from "../models/User";
 import CollectionService from "./CollectionService";
+import SignInAlertService from "./SignInAlertService";
 
 /** Every action the log knows. The vault app has a label for each. */
 export const AUDIT_ACTIONS = [
@@ -23,18 +24,26 @@ export const AUDIT_ACTIONS = [
   "session_revoked",
   "other_sessions_revoked",
   "password_reset",
+  "session_unlocked",
+  "unlock_failed",
+  "auto_lock_changed",
   // Items
   "item_created",
   "item_updated",
   "item_trashed",
   "item_restored",
   "item_moved",
+  "item_version_viewed",
+  "item_version_restored",
   "trash_emptied",
   "field_revealed",
   "field_copied",
   "item_autofilled",
   "vault_exported",
   "vault_imported",
+  "secret_link_created",
+  "secret_link_revoked",
+  "secret_link_opened",
   // Sharing
   "item_shared",
   "item_share_revoked",
@@ -46,6 +55,7 @@ export const AUDIT_ACTIONS = [
   "member_invited",
   "member_removed",
   "member_role_changed",
+  "company_policy_changed",
 ] as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];
@@ -62,8 +72,14 @@ const ACCOUNT_ACTIONS: AuditAction[] = [
   "session_revoked",
   "other_sessions_revoked",
   "password_reset",
+  "session_unlocked",
+  "unlock_failed",
+  "auto_lock_changed",
   "vault_exported",
   "vault_imported",
+  "secret_link_created",
+  "secret_link_revoked",
+  "secret_link_opened",
 ];
 
 // Revealing the same field over and over is one event, not fifty.
@@ -141,7 +157,7 @@ class AuditService {
         }
       }
 
-      await AuditEvent.create({
+      const event = await AuditEvent.create({
         actorId: input.actorId ?? null,
         action: input.action,
         noteId: input.noteId ?? null,
@@ -152,6 +168,9 @@ class AuditService {
         ip: input.req?.ip?.slice(0, 100) ?? null,
         userAgent: input.req?.get("user-agent")?.slice(0, 500) ?? null,
       });
+      // Every kind of sign-in is logged here, so this one check covers them
+      // all. It runs after the response, so sign-in isn't slowed by email.
+      if (input.action === "login") void SignInAlertService.afterLogin(event);
     } catch (error) {
       logger.err(`Could not record audit event ${input.action}: ${error}`);
     }

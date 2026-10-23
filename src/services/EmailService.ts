@@ -131,6 +131,53 @@ class EmailService {
     return this.deliver(input.to, subject, text, html);
   }
 
+  async sendNewSignIn(input: {
+    to: string;
+    device: string;
+    how: string;
+    ip: string | null;
+    time: Date;
+  }) {
+    const origin = EnvVars.FrontendOrigin || "http://localhost:5173";
+    const link = `${origin}/settings/security`;
+    const when = `${input.time.toLocaleString("en-GB", {
+      timeZone: "UTC",
+      dateStyle: "medium",
+      timeStyle: "short",
+    })} UTC`;
+    const subject = `New sign-in to 2keevo from ${input.device}`;
+    const facts = [
+      `Device: ${input.device}`,
+      `How: ${input.how}`,
+      `When: ${when}`,
+      ...(input.ip ? [`IP address: ${input.ip}`] : []),
+    ];
+    const text = [
+      "Your 2keevo account was just signed in from a device it hasn't seen before.",
+      "",
+      ...facts,
+      "",
+      "If this was you, there is nothing to do.",
+      "If it wasn't, change your password and sign out the other devices:",
+      "",
+      link,
+    ].join("\n");
+    const safeLink = escapeHtml(link);
+    const rows = facts
+      .map((fact) => {
+        const [label, ...rest] = fact.split(": ");
+        return `<tr><td style="padding:2px 16px 2px 0;color:#6b7280;">${escapeHtml(label)}</td><td style="padding:2px 0;">${escapeHtml(rest.join(": "))}</td></tr>`;
+      })
+      .join("");
+    const html = `<div style="font-family:Segoe UI,sans-serif;color:#1f2937;line-height:1.5;">
+<p style="margin:0 0 16px;">Your 2keevo account was just signed in from a device it hasn't seen before.</p>
+<table style="margin:0 0 16px;border-collapse:collapse;font-size:14px;">${rows}</table>
+<p style="margin:0 0 16px;">If this was you, there is nothing to do. If it wasn't, change your password and sign out the other devices.</p>
+<p style="margin:0;"><a href="${safeLink}" style="display:inline-block;background:#6d5efc;color:#ffffff;text-decoration:none;padding:10px 16px;border-radius:8px;">Security settings</a></p>
+</div>`;
+    return this.deliver(input.to, subject, text, html);
+  }
+
   async sendTwoFactorChanged(input: { to: string; enabled: boolean }) {
     const origin = EnvVars.FrontendOrigin || "http://localhost:5173";
     const link = `${origin}/settings/security`;

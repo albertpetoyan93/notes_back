@@ -12,6 +12,7 @@ export interface ReencryptReport {
   notesEncrypted: number;
   notesRekeyed: number;
   secretsRekeyed: number;
+  versionsRekeyed: number;
   failed: string[];
 }
 
@@ -28,6 +29,7 @@ export async function reencryptAll(): Promise<ReencryptReport> {
     notesEncrypted: 0,
     notesRekeyed: 0,
     secretsRekeyed: 0,
+    versionsRekeyed: 0,
     failed: [],
   };
 
@@ -89,6 +91,30 @@ export async function reencryptAll(): Promise<ReencryptReport> {
         report.failed.push(`2FA secret of user ${user.id}`);
       }
     }
+
+    // Version history (migration 028) holds item content too.
+    const [{ exists }] = await sequelize.query<{ exists: boolean }>(
+      `SELECT to_regclass('public.note_versions') IS NOT NULL AS exists`,
+      { type: QueryTypes.SELECT, transaction }
+    );
+    if (exists) {
+      const versions = await sequelize.query<{ id: number; content: string }>(
+        `SELECT id, content FROM "note_versions" ORDER BY id`,
+        { type: QueryTypes.SELECT, transaction }
+      );
+      for (const version of versions) {
+        if (!isEncryptedValue(version.content) || !needsReencrypt(version.content)) continue;
+        try {
+          await sequelize.query(`UPDATE "note_versions" SET content = :content WHERE id = :id`, {
+            replacements: { id: version.id, content: encrypt(decrypt(version.content)) },
+            transaction,
+          });
+          report.versionsRekeyed += 1;
+        } catch {
+          report.failed.push(`version ${version.id}`);
+        }
+      }
+    }
   });
 
   return report;
@@ -97,7 +123,7 @@ export async function reencryptAll(): Promise<ReencryptReport> {
 export function describeReport(report: ReencryptReport) {
   const lines = [
     `Encrypted ${report.notesEncrypted} item(s) that were stored as plain text.`,
-    `Re-encrypted ${report.notesRekeyed} item(s) and ${report.secretsRekeyed} 2FA secret(s) with the current key.`,
+    `Re-encrypted ${report.notesRekeyed} item(s), ${report.versionsRekeyed} saved version(s) and ${report.secretsRekeyed} 2FA secret(s) with the current key.`,
   ];
   if (report.failed.length) {
     lines.push(

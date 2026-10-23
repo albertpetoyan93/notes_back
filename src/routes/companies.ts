@@ -8,6 +8,9 @@ router.use(isAuth);
 router.get("/", CompanyController.list as RequestHandler);
 router.post("/", CompanyController.create as RequestHandler);
 router.put("/:id", CompanyController.rename as RequestHandler);
+// Security policies: owners and admins.
+router.get("/:id/policies", CompanyController.policies as RequestHandler);
+router.put("/:id/policies", CompanyController.updatePolicies as RequestHandler);
 router.get("/:id/collections", CompanyController.collections as RequestHandler);
 router.post("/:id/collections", CompanyController.createCollection as RequestHandler);
 router.post("/:id/collections/:collectionId/share", CompanyController.shareCollection as RequestHandler);

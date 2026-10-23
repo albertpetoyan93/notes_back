@@ -4,6 +4,7 @@ import { Op } from "sequelize";
 import EnvVars from "../common/EnvVars";
 import User from "../models/User";
 import UserSession, { SessionKind } from "../models/UserSession";
+import CompanyPolicyService from "./CompanyPolicyService";
 import { REFRESH_MAX_AGE_MS } from "../util/authCookies";
 
 /**
@@ -11,6 +12,17 @@ import { REFRESH_MAX_AGE_MS } from "../util/authCookies";
  * the same moment do not sign each other out (the browser shares the cookie).
  */
 const ROTATION_GRACE_MS = 30 * 1000;
+
+/** Allowed auto-lock times in minutes; 0 = never. */
+export const AUTO_LOCK_CHOICES = [0, 5, 15, 30, 60];
+
+// The vault app sends activity at most once a minute, so allow a little more.
+const ACTIVITY_SLACK_MS = 90 * 1000;
+
+export interface SessionState {
+  active: boolean;
+  locked: boolean;
+}
 
 export interface SessionMeta {
   userAgent?: string;
@@ -59,6 +71,7 @@ class SessionService {
       kind,
       tokenHash: hash(tokenId),
       lastUsedAt: new Date(),
+      lastActiveAt: new Date(),
       expiresAt: expiry(),
       ...metaFields(meta),
     });
@@ -89,6 +102,15 @@ class SessionService {
       where: { id: payload.sid, userId: payload.userId, kind },
     });
     if (!session || new Date(session.expiresAt).getTime() < Date.now()) {
+      throw new Error("Invalid refresh token");
+    }
+    // A company policy can limit how old a sign-in may get.
+    const { maxSessionDays } = await CompanyPolicyService.forUser(session.userId);
+    if (
+      maxSessionDays &&
+      Date.now() - new Date(session.createdAt).getTime() > maxSessionDays * 24 * 60 * 60 * 1000
+    ) {
+      await session.destroy();
       throw new Error("Invalid refresh token");
     }
 
@@ -155,6 +177,58 @@ class SessionService {
     } catch {
       return;
     }
+  }
+
+  /**
+   * Whether a session may be used, and whether it is locked. A web session
+   * that has seen no input for longer than the user's auto-lock time is
+   * locked here, so it stays locked even after the laptop wakes up.
+   */
+  static async state(
+    sessionId: number,
+    userId: number,
+    autoLockMinutes: number
+  ): Promise<SessionState> {
+    const session = await UserSession.findOne({
+      where: { id: sessionId, userId, expiresAt: { [Op.gt]: new Date() } },
+      attributes: ["id", "kind", "lastActiveAt", "lockedAt"],
+    });
+    if (!session) return { active: false, locked: false };
+    if (session.kind !== "web") return { active: true, locked: false };
+    if (session.lockedAt) return { active: true, locked: true };
+
+    const lastActive = session.lastActiveAt ? new Date(session.lastActiveAt).getTime() : 0;
+    if (
+      autoLockMinutes > 0 &&
+      lastActive &&
+      Date.now() - lastActive > autoLockMinutes * 60 * 1000 + ACTIVITY_SLACK_MS
+    ) {
+      await session.update({ lockedAt: new Date() });
+      return { active: true, locked: true };
+    }
+    return { active: true, locked: false };
+  }
+
+  static async lock(sessionId: number, userId: number) {
+    await UserSession.update(
+      { lockedAt: new Date() },
+      { where: { id: sessionId, userId, kind: "web", lockedAt: null } }
+    );
+  }
+
+  static async unlock(sessionId: number, userId: number) {
+    await UserSession.update(
+      { lockedAt: null, lastActiveAt: new Date() },
+      { where: { id: sessionId, userId } }
+    );
+  }
+
+  /** The person used the vault (input in the page). Ignored while locked. */
+  static async touch(sessionId: number, userId: number) {
+    await UserSession.update(
+      { lastActiveAt: new Date() },
+      { where: { id: sessionId, userId, lockedAt: null } }
+    );
   }
 
   static async isActive(sessionId: number, userId: number) {

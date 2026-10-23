@@ -16,6 +16,8 @@ interface UserAttributes {
   twoFactorSecret?: string | null;
   twoFactorRecoveryCodes?: string[] | null;
   twoFactorLastStep?: number | null;
+  /** Lock the vault after this many idle minutes; 0 = never. */
+  autoLockMinutes?: number;
   createdAt?: Date;
   updatedAt?: Date;
 }
@@ -33,6 +35,7 @@ interface UserCreationAttributes
     | "twoFactorSecret"
     | "twoFactorRecoveryCodes"
     | "twoFactorLastStep"
+    | "autoLockMinutes"
     | "createdAt"
     | "updatedAt"
   > {}
@@ -54,6 +57,7 @@ class User
   public twoFactorSecret?: string | null;
   public twoFactorRecoveryCodes?: string[] | null;
   public twoFactorLastStep?: number | null;
+  public autoLockMinutes!: number;
   public readonly createdAt!: Date;
   public readonly updatedAt!: Date;
 
@@ -111,6 +115,11 @@ User.init(
       type: DataTypes.BOOLEAN,
       allowNull: false,
       defaultValue: false,
+    },
+    autoLockMinutes: {
+      type: DataTypes.INTEGER,
+      allowNull: false,
+      defaultValue: 15,
     },
     twoFactorSecret: {
       type: DataTypes.TEXT,

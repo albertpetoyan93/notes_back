@@ -3,6 +3,7 @@ import CompanyService from "../services/CompanyService";
 import AuditService from "../services/AuditService";
 import CompanyMember from "../models/CompanyMember";
 import CollectionService from "../services/CollectionService";
+import CompanyPolicyService, { PolicyError } from "../services/CompanyPolicyService";
 
 export default class CompanyController {
   static list = async (req: any, res: Response) => {
@@ -41,6 +42,43 @@ export default class CompanyController {
       res.status(error.status || 500).json({
         message: error.status ? error.message : "Error renaming company",
       });
+    }
+  };
+
+  static policies = async (req: any, res: Response) => {
+    try {
+      const companyId = parseInt(req.params.id);
+      if (isNaN(companyId)) return res.status(400).json({ message: "Invalid company" });
+      res.json(await CompanyPolicyService.get(companyId, req.user?.id));
+    } catch (error: any) {
+      if (error instanceof PolicyError) return res.status(error.status).json({ message: error.message });
+      console.error("Error loading policies:", error);
+      res.status(500).json({ message: "Error loading policies" });
+    }
+  };
+
+  static updatePolicies = async (req: any, res: Response) => {
+    try {
+      const companyId = parseInt(req.params.id);
+      if (isNaN(companyId)) return res.status(400).json({ message: "Invalid company" });
+      const result = await CompanyPolicyService.update(companyId, req.user?.id, req.body || {});
+      if (result.changed.length) {
+        await AuditService.record({
+          actorId: req.user?.id,
+          action: "company_policy_changed",
+          companyId,
+          details: {
+            changed: result.changed,
+            ...Object.fromEntries(result.changed.map((key) => [key, result.policies[key] ?? null])),
+          },
+          req,
+        });
+      }
+      res.json(await CompanyPolicyService.get(companyId, req.user?.id));
+    } catch (error: any) {
+      if (error instanceof PolicyError) return res.status(error.status).json({ message: error.message });
+      console.error("Error saving policies:", error);
+      res.status(500).json({ message: "Error saving policies" });
     }
   };
 

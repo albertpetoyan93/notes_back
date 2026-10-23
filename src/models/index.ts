@@ -17,6 +17,9 @@ import Company from "./Company";
 import CompanyMember from "./CompanyMember";
 import UserSession from "./UserSession";
 import UserPasskey from "./UserPasskey";
+import BreachResult from "./BreachResult";
+import NoteVersion from "./NoteVersion";
+import SecretLink from "./SecretLink";
 import AuditEvent from "./AuditEvent";
 
 // Define all associations here to avoid circular dependencies
@@ -252,6 +255,13 @@ function setupAssociations() {
   User.hasMany(UserPasskey, { foreignKey: "userId", as: "passkeys", onDelete: "CASCADE" });
   UserPasskey.belongsTo(User, { foreignKey: "userId", as: "user" });
 
+  Note.hasMany(BreachResult, { foreignKey: "noteId", onDelete: "CASCADE" });
+  BreachResult.belongsTo(Note, { foreignKey: "noteId" });
+
+  Note.hasMany(NoteVersion, { foreignKey: "noteId", as: "versions", onDelete: "CASCADE" });
+  NoteVersion.belongsTo(Note, { foreignKey: "noteId" });
+  NoteVersion.belongsTo(User, { foreignKey: "changedBy", as: "author", constraints: false });
+
   AuditEvent.belongsTo(User, { as: "actor", foreignKey: "actorId", constraints: false });
   AuditEvent.belongsTo(User, { as: "target", foreignKey: "targetUserId", constraints: false });
 }
@@ -269,6 +279,9 @@ export default {
   CompanyMember,
   UserSession,
   UserPasskey,
+  BreachResult,
+  NoteVersion,
+  SecretLink,
   AuditEvent,
   setupAssociations,
 };

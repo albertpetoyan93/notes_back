@@ -1,4 +1,5 @@
 import Note from "../models/Note";
+import BreachResult from "../models/BreachResult";
 import NoteShare, { SharePermission } from "../models/NoteShare";
 import NoteFavorite from "../models/NoteFavorite";
 import User from "../models/User";
@@ -13,6 +14,8 @@ import { Op } from "sequelize";
 import sequelize from "../configs/DB/sequelize";
 import { isDecryptionFailure } from "../util/encryption";
 import AccessService from "./AccessService";
+import VersionService, { type ItemState } from "./VersionService";
+import CompanyPolicyService from "./CompanyPolicyService";
 import {
   addPasskey,
   cleanOnCreate,
@@ -33,6 +36,14 @@ function isTotpFieldLabel(label: unknown) {
 
 // Recovery (backup) codes for a site. Same rule as utils/recoveryCodes.ts.
 const RECOVERY_LABEL = /^((2fa|mfa|two[- ]?factor) )?(recovery|backup)( codes?| keys?)?$/i;
+
+/** Health flags for a personal login; `breached` is how often it was seen in leaks. */
+export interface PasswordHealth {
+  weak: boolean;
+  reused: boolean;
+  stale: boolean;
+  breached: number;
+}
 
 // Same rule as the vault app (utils/secretField.ts): these values stay hidden.
 function isSecretFieldLabel(label: unknown) {
@@ -437,7 +448,7 @@ class NoteService {
       notes.map((note) => note.id)
     );
     const passwordHealthById = filters?.trash
-      ? new Map<number, { weak: boolean; reused: boolean; stale: boolean }>()
+      ? new Map<number, PasswordHealth>()
       : await this.passwordHealthByNoteId(userId);
 
     // Shown to whoever manages access: the owner, or company owners/admins.
@@ -692,6 +703,7 @@ class NoteService {
     }
 
     const content = cleanOnCreate(data.content);
+    await this.assertPasswordRule(requested || [], content);
     const note = await Note.create({
       title: data.title,
       content,
@@ -701,6 +713,12 @@ class NoteService {
       tags: data.tags || [],
       isEncrypted: data.isEncrypted || storedPasskeys(content).length > 0,
       userId,
+    });
+    await this.keepVersion(note.id, userId, {
+      title: note.title,
+      category: note.category,
+      tags: note.tags || [],
+      content,
     });
 
     if (requested?.length) {
@@ -747,6 +765,19 @@ class NoteService {
     }
     const content =
       data.content !== undefined ? mergeOnUpdate(note.content, data.content) : note.content;
+    if (data.content !== undefined || this.requestedCollectionIds(data)) {
+      const linkedIds = ((await CollectionService.collectionsByNoteId([note.id])).get(note.id) || []).map(
+        (collection) => collection.id
+      );
+      await this.assertPasswordRule([...linkedIds, ...(this.requestedCollectionIds(data) || [])], content);
+    }
+    const before: ItemState & { savedAt?: Date } = {
+      title: note.title,
+      category: storedCategory(note.category),
+      tags: note.tags || [],
+      content: note.content,
+      savedAt: note.updatedAt,
+    };
     const payload: any = {
       title: data.title !== undefined ? data.title : note.title,
       content,
@@ -767,6 +798,12 @@ class NoteService {
     }
 
     await note.update(payload);
+    await this.keepVersion(
+      note.id,
+      userId,
+      { title: payload.title, category: payload.category, tags: payload.tags || [], content },
+      before
+    );
     if (access.permission === "owner" && requested) {
       await CollectionService.setNoteCollections(note.id, requested);
     }
@@ -791,6 +828,91 @@ class NoteService {
       favoriteNoteIds,
       collections.get(note.id)
     );
+  }
+
+  /** A company's minimum password length, for logins in its collections. */
+  private async assertPasswordRule(collectionIds: number[], content: any) {
+    if (!collectionIds.length) return;
+    const collections = await Collection.findAll({
+      where: { id: { [Op.in]: collectionIds } },
+      attributes: ["id", "companyId"],
+    });
+    const companyIds = [
+      ...new Set(collections.map((item) => item.companyId).filter((id): id is number => !!id)),
+    ];
+    const rule = await CompanyPolicyService.minPasswordLength(companyIds);
+    if (!rule) return;
+    const fields = content && typeof content === "object" && Array.isArray(content.customFields)
+      ? content.customFields
+      : [];
+    for (const field of fields) {
+      const value = String(field?.value ?? "");
+      if (/pass/i.test(String(field?.label ?? "")) && value && value.length < rule.length) {
+        throw Object.assign(
+          new Error(
+            `${rule.company} requires passwords of at least ${rule.length} characters. "${field.label}" has ${value.length}.`
+          ),
+          { status: 400 }
+        );
+      }
+    }
+  }
+
+  // History must never stop a save; a failure is logged instead.
+  private async keepVersion(
+    noteId: number,
+    userId: number,
+    after: ItemState,
+    before?: ItemState & { savedAt?: Date }
+  ) {
+    try {
+      await VersionService.afterSave(noteId, after, userId, before);
+    } catch (error: any) {
+      console.error("Could not keep a version of item", noteId, error?.message || error);
+    }
+  }
+
+  /** Who may see and restore versions: the people who may edit the item. */
+  private async versionAccess(noteId: number, userId: number) {
+    const access = await this.getNoteAccess(noteId, userId);
+    if (!access || (access.permission !== "owner" && access.permission !== "edit")) {
+      return null;
+    }
+    return access;
+  }
+
+  async listVersions(noteId: number, userId: number) {
+    if (!(await this.versionAccess(noteId, userId))) return null;
+    return VersionService.list(noteId);
+  }
+
+  async getVersion(noteId: number, versionId: number, userId: number) {
+    if (!(await this.versionAccess(noteId, userId))) return null;
+    return VersionService.get(noteId, versionId);
+  }
+
+  /**
+   * Put an older version back. It is saved like an edit, so the state before
+   * the restore becomes a version too and the restore can be undone.
+   */
+  async restoreVersion(noteId: number, versionId: number, userId: number) {
+    if (!(await this.versionAccess(noteId, userId))) return null;
+    const version = await VersionService.get(noteId, versionId);
+    if (!version) return null;
+    if (isDecryptionFailure(version.content)) {
+      throw Object.assign(new Error("This version could not be decrypted."), { status: 409 });
+    }
+    const content =
+      version.content && typeof version.content === "object"
+        ? (({ passkeys: _passkeys, ...rest }) => rest)(version.content)
+        : version.content;
+    const saved = await this.updateNote(noteId, userId, {
+      title: version.title,
+      category: version.category as any,
+      tags: version.tags,
+      content,
+    });
+    return saved ? { note: saved, version } : null;
   }
 
   async autofill(userId: number, host: string, query = "") {
@@ -1109,10 +1231,21 @@ class NoteService {
     });
 
     const staleBefore = Date.now() - 180 * 24 * 60 * 60 * 1000;
-    const health = new Map<
-      number,
-      { weak: boolean; reused: boolean; stale: boolean }
-    >();
+    const health = new Map<number, PasswordHealth>();
+
+    // A leak result only counts while it is newer than the item's last change.
+    // If the lookup fails (say, migration 026 hasn't run yet), the vault still
+    // loads; it just shows no leak flags.
+    const breaches = personalNotes.length
+      ? await BreachResult.findAll({
+          where: { userId, noteId: { [Op.in]: personalNotes.map((note) => note.id) } },
+          attributes: ["noteId", "count", "checkedAt"],
+        }).catch((error) => {
+          console.error("Could not read leak check results:", error?.message || error);
+          return [] as BreachResult[];
+        })
+      : [];
+    const breachByNote = new Map(breaches.map((row) => [row.noteId, row]));
 
     personalNotes.forEach((note) => {
       const values = valuesByNote.get(note.id) || [];
@@ -1122,12 +1255,71 @@ class NoteService {
         (value) => (noteIdsBySecret.get(value)?.size || 0) > 1
       );
       const stale = new Date(note.updatedAt).getTime() < staleBefore;
-      if (weak || reused || stale) {
-        health.set(note.id, { weak, reused, stale });
+      const result = breachByNote.get(note.id);
+      const breached =
+        result && result.checkedAt.getTime() >= new Date(note.updatedAt).getTime()
+          ? result.count
+          : 0;
+      if (weak || reused || stale || breached) {
+        health.set(note.id, { weak, reused, stale, breached });
       }
     });
 
     return health;
+  }
+
+  /** When each personal login was last checked for leaks. */
+  async breachStatus(userId: number) {
+    const rows = await BreachResult.findAll({
+      where: { userId },
+      attributes: ["noteId", "checkedAt"],
+    });
+    return {
+      checkedAt: rows.length
+        ? new Date(Math.max(...rows.map((row) => row.checkedAt.getTime())))
+        : null,
+      results: rows.map((row) => ({ noteId: row.noteId, checkedAt: row.checkedAt })),
+    };
+  }
+
+  /**
+   * Saves leak counts the browser worked out. Only for the caller's own
+   * personal logins, the same ones the other health checks cover.
+   */
+  async saveBreachResults(userId: number, results: unknown) {
+    if (!Array.isArray(results) || results.length > 5000) {
+      throw Object.assign(new Error("Send up to 5000 results"), { status: 400 });
+    }
+    const counts = new Map<number, number>();
+    for (const item of results as any[]) {
+      const noteId = Number(item?.noteId);
+      const count = Number(item?.count);
+      if (!Number.isInteger(noteId) || !Number.isInteger(count) || count < 0) {
+        throw Object.assign(new Error("Each result needs a noteId and a count"), { status: 400 });
+      }
+      counts.set(noteId, Math.min(count, 2_000_000_000));
+    }
+    if (!counts.size) return { saved: 0 };
+
+    const owned = await Note.findAll({
+      where: {
+        id: { [Op.in]: [...counts.keys()] },
+        userId,
+        category: { [Op.in]: ["password", "login"] },
+      },
+      attributes: ["id"],
+    });
+    const checkedAt = new Date();
+    await BreachResult.bulkCreate(
+      owned.map((note) => ({
+        userId,
+        noteId: note.id,
+        count: counts.get(note.id) || 0,
+        checkedAt,
+      })),
+      { updateOnDuplicate: ["count", "checkedAt"], conflictAttributes: ["userId", "noteId"] }
+    );
+    return { saved: owned.length };
   }
 
   async purgeOldTrash(userId: number) {

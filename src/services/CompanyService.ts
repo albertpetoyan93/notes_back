@@ -1,9 +1,10 @@
 import { Op } from "sequelize";
 import sequelize from "../configs/DB/sequelize";
-import Company from "../models/Company";
+import Company, { type CompanyPolicies } from "../models/Company";
 import CompanyMember, { CompanyRole } from "../models/CompanyMember";
 import User from "../models/User";
 import { formatCompanyName } from "../util/formatCompanyName";
+import CompanyPolicyService from "./CompanyPolicyService";
 import EmailService from "./EmailService";
 
 const INVITE_MS = 14 * 24 * 60 * 60 * 1000;
@@ -15,6 +16,10 @@ export interface CompanySummary {
   role: "owner" | "admin" | "member";
   memberStatus: "invited" | "active" | "removed";
   expiresAt: string | null;
+  /** The company's rules, so the vault can explain them (e.g. password length). */
+  policies: CompanyPolicies;
+  /** Set when the company's rules keep its items closed to this person. */
+  blocked: "2fa" | null;
 }
 
 class CompanyService {
@@ -52,12 +57,13 @@ class CompanyService {
         {
           model: Company,
           as: "company",
-          attributes: ["id", "name", "status"],
+          attributes: ["id", "name", "status", "policies"],
         },
       ],
       order: [["createdAt", "ASC"]],
     });
 
+    const { blocked } = await CompanyPolicyService.forUser(userId);
     const summaries: CompanySummary[] = [];
     for (const member of members) {
       const company = member.get("company") as Company | undefined;
@@ -73,6 +79,8 @@ class CompanyService {
         role: member.role,
         memberStatus: member.status,
         expiresAt: member.expiresAt ? member.expiresAt.toISOString() : null,
+        policies: CompanyPolicyService.clean(company.policies || {}),
+        blocked: blocked.has(company.id) ? "2fa" : null,
       });
     }
     return summaries;
@@ -113,6 +121,8 @@ class CompanyService {
         role: "owner",
         memberStatus: "active",
         expiresAt: null,
+        policies: CompanyPolicyService.clean({}),
+        blocked: null,
       };
     } catch (error) {
       await transaction.rollback();
@@ -281,6 +291,8 @@ class CompanyService {
     await this.claimInvites(userId, user.email);
     const member = await this.openInvite(companyId, userId);
     await member.update({ status: "active", expiresAt: null });
+    // The company's rules (e.g. require 2FA) apply from the first request.
+    CompanyPolicyService.clear(userId);
     return this.summary(member);
   }
 
@@ -345,7 +357,9 @@ class CompanyService {
         status: "invited",
         [Op.or]: [{ expiresAt: null }, { expiresAt: { [Op.gt]: new Date() } }],
       },
-      include: [{ model: Company, as: "company", attributes: ["id", "name", "status"] }],
+      include: [
+        { model: Company, as: "company", attributes: ["id", "name", "status", "policies"] },
+      ],
     });
     if (!member) {
       throw Object.assign(new Error("Invite not found or expired"), { status: 404 });
@@ -362,6 +376,9 @@ class CompanyService {
       role: member.role,
       memberStatus: member.status,
       expiresAt: null,
+      policies: CompanyPolicyService.clean(company.policies || {}),
+      // Worked out on the next list; a new member's cached rules are cleared below.
+      blocked: null,
     };
   }
 }

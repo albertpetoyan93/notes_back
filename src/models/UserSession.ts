@@ -13,6 +13,10 @@ interface UserSessionAttributes {
   userAgent?: string | null;
   ip?: string | null;
   lastUsedAt: Date;
+  /** Last real input from the person (web sessions); drives auto-lock. */
+  lastActiveAt?: Date | null;
+  /** Set while the session is locked. */
+  lockedAt?: Date | null;
   expiresAt: Date;
   createdAt?: Date;
   updatedAt?: Date;
@@ -26,6 +30,8 @@ type UserSessionCreation = Optional<
   | "userAgent"
   | "ip"
   | "lastUsedAt"
+  | "lastActiveAt"
+  | "lockedAt"
   | "createdAt"
   | "updatedAt"
 >;
@@ -43,6 +49,8 @@ class UserSession
   public userAgent?: string | null;
   public ip?: string | null;
   public lastUsedAt!: Date;
+  public lastActiveAt?: Date | null;
+  public lockedAt?: Date | null;
   public expiresAt!: Date;
   public readonly createdAt!: Date;
   public readonly updatedAt!: Date;
@@ -88,6 +96,14 @@ UserSession.init(
       type: DataTypes.DATE,
       allowNull: false,
       defaultValue: DataTypes.NOW,
+    },
+    lastActiveAt: {
+      type: DataTypes.DATE,
+      allowNull: true,
+    },
+    lockedAt: {
+      type: DataTypes.DATE,
+      allowNull: true,
     },
     expiresAt: {
       type: DataTypes.DATE,

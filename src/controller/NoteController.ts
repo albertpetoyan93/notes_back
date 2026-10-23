@@ -205,8 +205,35 @@ export default class NoteController {
 
       res.status(201).json(note);
     } catch (error) {
+      // Rules people can act on (a company's password length, a collection they can't use).
+      if ((error as any)?.status >= 400 && (error as any)?.status < 500) {
+        return res.status((error as any).status).json({ message: (error as any).message });
+      }
       console.error("Error creating note:", error);
       res.status(500).json({ message: "Error creating note" });
+    }
+  };
+
+  static breachStatus = async (req: any, res: Response) => {
+    try {
+      const userId = req.user?.id;
+      if (!userId) return res.status(401).json({ message: "Unauthorized" });
+      res.json(await NoteService.breachStatus(userId));
+    } catch (error) {
+      console.error("Error reading breach results:", error);
+      res.status(500).json({ message: "Error reading breach results" });
+    }
+  };
+
+  static saveBreachResults = async (req: any, res: Response) => {
+    try {
+      const userId = req.user?.id;
+      if (!userId) return res.status(401).json({ message: "Unauthorized" });
+      res.json(await NoteService.saveBreachResults(userId, req.body?.results));
+    } catch (error: any) {
+      if (error?.status === 400) return res.status(400).json({ message: error.message });
+      console.error("Error saving breach results:", error);
+      res.status(500).json({ message: "Error saving breach results" });
     }
   };
 
@@ -331,8 +358,8 @@ export default class NoteController {
 
       res.json(note);
     } catch (error: any) {
-      if (error?.status === 409) {
-        return res.status(409).json({ message: error.message });
+      if (error?.status >= 400 && error?.status < 500) {
+        return res.status(error.status).json({ message: error.message });
       }
       console.error("Error updating note:", error);
       res.status(500).json({ message: "Error updating note" });
@@ -693,6 +720,65 @@ export default class NoteController {
   };
 
   // History of one item (owner, or company owners/admins)
+  static listVersions = async (req: any, res: Response) => {
+    try {
+      const versions = await NoteService.listVersions(Number(req.params.id), req.user?.id);
+      if (!versions) return res.status(404).json({ message: "Item not found" });
+      res.json(versions);
+    } catch (error) {
+      console.error("Error listing versions:", error);
+      res.status(500).json({ message: "Error listing versions" });
+    }
+  };
+
+  static getVersion = async (req: any, res: Response) => {
+    try {
+      const noteId = Number(req.params.id);
+      const version = await NoteService.getVersion(
+        noteId,
+        Number(req.params.versionId),
+        req.user?.id
+      );
+      if (!version) return res.status(404).json({ message: "Version not found" });
+      // Opening a version shows its secrets, like opening the item does.
+      await AuditService.record({
+        actorId: req.user?.id,
+        action: "item_version_viewed",
+        noteId,
+        details: { versionId: version.id, versionDate: version.createdAt },
+        req,
+      });
+      res.json(version);
+    } catch (error) {
+      console.error("Error opening version:", error);
+      res.status(500).json({ message: "Error opening version" });
+    }
+  };
+
+  static restoreVersion = async (req: any, res: Response) => {
+    try {
+      const noteId = Number(req.params.id);
+      const result = await NoteService.restoreVersion(
+        noteId,
+        Number(req.params.versionId),
+        req.user?.id
+      );
+      if (!result) return res.status(404).json({ message: "Version not found" });
+      await AuditService.record({
+        actorId: req.user?.id,
+        action: "item_version_restored",
+        noteId,
+        details: { versionId: result.version.id, versionDate: result.version.createdAt },
+        req,
+      });
+      res.json(result.note);
+    } catch (error: any) {
+      if (error?.status === 409) return res.status(409).json({ message: error.message });
+      console.error("Error restoring version:", error);
+      res.status(500).json({ message: "Error restoring version" });
+    }
+  };
+
   static activity = async (req: any, res: Response) => {
     try {
       const userId = req.user?.id;

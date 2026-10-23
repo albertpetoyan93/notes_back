@@ -1,4 +1,5 @@
 import { Op } from "sequelize";
+import CompanyPolicyService from "./CompanyPolicyService";
 import Collection from "../models/Collection";
 import CollectionNote from "../models/CollectionNote";
 import CollectionShare from "../models/CollectionShare";
@@ -23,6 +24,8 @@ class CollectionService {
     if (collection.companyId) {
       const company = await Company.findByPk(collection.companyId);
       if (!company || company.status !== "active") return null;
+      // The company requires 2FA and this person doesn't use it.
+      if ((await CompanyPolicyService.forUser(userId)).blocked.has(company.id)) return null;
       const member = await CompanyMember.findOne({
         where: {
           companyId: collection.companyId,
@@ -129,6 +132,8 @@ class CollectionService {
     if (!access) {
       throw Object.assign(new Error("Company not found"), { status: 404 });
     }
+    // Required 2FA missing: nothing of the company opens, names included.
+    if ((await CompanyPolicyService.forUser(userId)).blocked.has(companyId)) return [];
     const collections = await Collection.findAll({
       where: { companyId },
       order: [["name", "ASC"]],
@@ -348,7 +353,8 @@ class CollectionService {
       where: { id: { [Op.in]: ids }, status: "active" },
       attributes: ["id"],
     });
-    return new Set(companies.map((company) => company.id));
+    const { blocked } = await CompanyPolicyService.forUser(userId);
+    return new Set(companies.map((company) => company.id).filter((id) => !blocked.has(id)));
   }
 
   /** Collections this user can open in an active company while their membership is active. */
@@ -368,9 +374,11 @@ class CollectionService {
       attributes: ["id"],
     });
     const activeIds = new Set(companies.map((company) => company.id));
+    // Companies that require 2FA from someone who doesn't use it stay closed.
+    const { blocked } = await CompanyPolicyService.forUser(userId);
 
     for (const member of memberships) {
-      if (!activeIds.has(member.companyId)) continue;
+      if (!activeIds.has(member.companyId) || blocked.has(member.companyId)) continue;
       const collections = await Collection.findAll({
         where: { companyId: member.companyId },
         attributes: ["id", "companyShare"],

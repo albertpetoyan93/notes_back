@@ -10,6 +10,7 @@ import TwoFactorService, { TwoFactorError } from "@src/services/TwoFactorService
 import EmailService from "@src/services/EmailService";
 import logger from "jet-logger";
 import AuditService from "@src/services/AuditService";
+import CompanyPolicyService from "@src/services/CompanyPolicyService";
 
 export function publicUser(user: {
   id: number;
@@ -390,6 +391,8 @@ export default class AuthController {
       const user = await currentUser(req, res);
       if (!user) return;
       const recoveryCodes = await TwoFactorService.enable(user, req.body?.code);
+      // Companies that require 2FA open up at once.
+      CompanyPolicyService.clear(user.id);
       // Anyone already signed in elsewhere has not passed the new second factor.
       await SessionService.revokeAll(user.id, req.user?.sessionId);
       notifyTwoFactorChanged(user, true);
@@ -409,6 +412,7 @@ export default class AuthController {
       const user = await currentUser(req, res);
       if (!user) return;
       await TwoFactorService.disable(user, req.body?.password, req.body?.code);
+      CompanyPolicyService.clear(user.id);
       notifyTwoFactorChanged(user, false);
       await AuditService.record({ actorId: user.id, action: "two_factor_disabled", req: req as unknown as Request });
       res.status(HttpStatusCodes.OK).send({ ok: true });
@@ -554,7 +558,15 @@ export default class AuthController {
         return;
       }
 
-      res.status(HttpStatusCodes.OK).send(user);
+      // The vault app shows its lock screen straight away for a locked session.
+      // Auto-lock after company rules, and the cap itself so the settings can show it.
+      const rules = await CompanyPolicyService.forUser(user.id);
+      res.status(HttpStatusCodes.OK).send({
+        ...user.toJSON(),
+        autoLockMinutes: CompanyPolicyService.effectiveAutoLock(user.autoLockMinutes ?? 15, rules),
+        autoLockLimit: rules.maxIdleMinutes,
+        locked: Boolean((req.user as { locked?: boolean } | undefined)?.locked),
+      });
     } catch (e) {
       next(e);
     }

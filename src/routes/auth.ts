@@ -1,4 +1,5 @@
 import AuthController from "@src/controller/AuthController";
+import LockController from "@src/controller/LockController";
 import PasskeyController from "@src/controller/PasskeyController";
 import isAuth from "@src/middlwares/isAuth";
 import rateLimit from "express-rate-limit";
@@ -77,6 +78,13 @@ router.post(
 router.post("/passkeys/register/verify", isAuth, PasskeyController.register as any);
 router.patch("/passkeys/:id", isAuth, PasskeyController.rename as any);
 router.delete("/passkeys/:id", isAuth, PasskeyController.remove as any);
+// Auto-lock. Unlocking is rate limited like the 2FA step.
+router.post("/session/active", isAuth, LockController.active as any);
+router.post("/lock", isAuth, LockController.lock as any);
+router.post("/unlock", twoFactorLimiter, isAuth, LockController.unlock as any);
+router.post("/unlock/passkey/options", isAuth, LockController.passkeyOptions as any);
+router.post("/unlock/passkey", twoFactorLimiter, isAuth, LockController.unlockWithPasskey as any);
+router.patch("/settings", isAuth, LockController.settings as any);
 router.get("/sessions", isAuth, AuthController.listSessions as any);
 router.post(
   "/sessions/revoke-others",

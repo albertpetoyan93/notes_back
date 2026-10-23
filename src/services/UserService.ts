@@ -14,6 +14,7 @@ class UserService {
         "email",
         "fullName",
         "twoFactorEnabled",
+        "autoLockMinutes",
         "createdAt",
       ],
     });
