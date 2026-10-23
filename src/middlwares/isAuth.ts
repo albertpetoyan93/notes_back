@@ -19,7 +19,9 @@ const isAuth: RequestHandler = async (
       typeof header === "string" && header.startsWith("Bearer ")
         ? header.slice("Bearer ".length).trim()
         : undefined;
-    const token = (req.cookies?.access_token as string | undefined) || bearer;
+    // An explicit Authorization header wins. Chrome also attaches the vault's cookies
+    // to the extension's requests, and the extension must act as its own session.
+    const token = bearer || (req.cookies?.access_token as string | undefined);
 
     if (!token) {
       throw new CustomError("Unauthorized", HttpStatusCodes.UNAUTHORIZED);
