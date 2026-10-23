@@ -3,8 +3,75 @@ import NoteService from "../services/NoteService";
 import AuditService from "../services/AuditService";
 import NotificationService from "../services/NotificationService";
 import User from "../models/User";
+import UserSession from "../models/UserSession";
+
+// Private keys go only to the browser extension's own session, not to the vault's.
+async function fromExtension(req: any) {
+  const sessionId = req.user?.sessionId;
+  if (!sessionId) return false;
+  const session = await UserSession.findByPk(sessionId, { attributes: ["kind", "userId"] });
+  return !!session && session.kind === "extension" && session.userId === req.user?.id;
+}
 
 export default class NoteController {
+  /** Passkeys for a site, for the extension to sign in with. */
+  static passkeys = async (req: any, res: Response) => {
+    try {
+      const userId = req.user?.id;
+      if (!userId) return res.status(401).json({ message: "Unauthorized" });
+      if (!(await fromExtension(req))) {
+        return res.status(403).json({ message: "Only the 2keevo extension can use passkeys." });
+      }
+      const host = String(req.query.host || "");
+      const passkeys = await NoteService.passkeysForSite(userId, host);
+      for (const noteId of new Set(passkeys.map((passkey) => passkey.noteId))) {
+        await AuditService.record({
+          actorId: userId,
+          action: "item_autofilled",
+          noteId,
+          details: { host: host.slice(0, 200), passkey: true },
+          req,
+        });
+      }
+      res.json(passkeys);
+    } catch (error: any) {
+      if (error?.status === 400) return res.status(400).json({ message: error.message });
+      console.error("Error finding passkeys:", error);
+      res.status(500).json({ message: "Error finding passkeys" });
+    }
+  };
+
+  /** Save a passkey the extension made, on a chosen login or a new one. */
+  static savePasskey = async (req: any, res: Response) => {
+    try {
+      const userId = req.user?.id;
+      if (!userId) return res.status(401).json({ message: "Unauthorized" });
+      if (!(await fromExtension(req))) {
+        return res.status(403).json({ message: "Only the 2keevo extension can save passkeys." });
+      }
+      const result = await NoteService.savePasskey(userId, {
+        noteId: req.body?.noteId ?? null,
+        passkey: req.body?.passkey,
+      });
+      await AuditService.record({
+        actorId: userId,
+        action: result.created ? "item_created" : "item_updated",
+        noteId: result.noteId,
+        details: { passkey: String(req.body?.passkey?.rpId || "").slice(0, 200) },
+        req,
+      });
+      res.status(result.created ? 201 : 200).json(result);
+    } catch (error: any) {
+      const status = error?.status;
+      if (status === 400 || status === 403 || status === 409) {
+        return res.status(status).json({ message: error.message });
+      }
+      console.error("Error saving passkey:", error);
+      res.status(500).json({ message: "Error saving passkey" });
+    }
+  };
+
+
   static autofill = async (req: any, res: Response) => {
     try {
       const userId = req.user?.id;

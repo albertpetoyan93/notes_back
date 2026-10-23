@@ -1,4 +1,5 @@
 import AuthController from "@src/controller/AuthController";
+import PasskeyController from "@src/controller/PasskeyController";
 import isAuth from "@src/middlwares/isAuth";
 import rateLimit from "express-rate-limit";
 import { Router } from "express";
@@ -62,6 +63,20 @@ router.post(
   twoFactorLimiter,
   AuthController.twoFactorRecoveryCodes as any
 );
+// Passkeys: sign in without a password, and manage the ones on the account.
+router.post("/passkeys/login/options", authLimiter, PasskeyController.loginOptions);
+router.post("/passkeys/login/verify", authLimiter, PasskeyController.login);
+router.get("/passkeys", isAuth, PasskeyController.list as any);
+// Asks for the password, so it shares the tighter limit.
+router.post(
+  "/passkeys/register/options",
+  isAuth,
+  twoFactorLimiter,
+  PasskeyController.registrationOptions as any
+);
+router.post("/passkeys/register/verify", isAuth, PasskeyController.register as any);
+router.patch("/passkeys/:id", isAuth, PasskeyController.rename as any);
+router.delete("/passkeys/:id", isAuth, PasskeyController.remove as any);
 router.get("/sessions", isAuth, AuthController.listSessions as any);
 router.post(
   "/sessions/revoke-others",

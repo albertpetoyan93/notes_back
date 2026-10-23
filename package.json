@@ -12,12 +12,13 @@
     "reencrypt:prod": "cross-env NODE_ENV=production npx ts-node -r module-alias/register ./src/scripts/reencrypt.ts",
     "migrate:release": "NODE_ENV=production node -r ./preload.js ./dist/configs/DB/migrate.js",
     "reencrypt:release": "NODE_ENV=production node -r ./preload.js ./dist/scripts/reencrypt.js",
-    "reencrypt:dev":"cross-env NODE_ENV=development npx ts-node -r module-alias/register ./src/scripts/reencrypt.ts"
+    "reencrypt:dev": "cross-env NODE_ENV=development npx ts-node -r module-alias/register ./src/scripts/reencrypt.ts"
   },
   "engines": {
     "node": ">=16.0.0"
   },
   "dependencies": {
+    "@simplewebauthn/server": "^13.3.3",
     "@slack/web-api": "^7.9.3",
     "bcrypt": "^5.1.1",
     "cookie-parser": "^1.4.7",

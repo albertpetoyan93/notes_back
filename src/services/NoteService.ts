@@ -13,6 +13,15 @@ import { Op } from "sequelize";
 import sequelize from "../configs/DB/sequelize";
 import { isDecryptionFailure } from "../util/encryption";
 import AccessService from "./AccessService";
+import {
+  addPasskey,
+  cleanOnCreate,
+  cleanPasskey,
+  mergeOnUpdate,
+  rpIdMatchesHost,
+  storedPasskeys,
+  withoutPrivateKeys,
+} from "../util/passkeyContent";
 
 // An authenticator (TOTP) key field. Same rule as the vault app (utils/totp.ts).
 // None of these contain "pass", so a key is never taken for a password.
@@ -284,6 +293,7 @@ class NoteService {
     json.collections = linked;
     json.collection = linked[0] || null;
     json.collectionId = linked[0]?.id ?? null;
+    json.content = withoutPrivateKeys(json.content);
     if (!isOwner) {
       json.sharedByName = owner?.fullName || owner?.username || "Someone";
     }
@@ -681,14 +691,15 @@ class NoteService {
       }
     }
 
+    const content = cleanOnCreate(data.content);
     const note = await Note.create({
       title: data.title,
-      content: data.content,
+      content,
       category: storedCategory(data.category) || "note",
       project: data.project,
       collectionId: null,
       tags: data.tags || [],
-      isEncrypted: data.isEncrypted || false,
+      isEncrypted: data.isEncrypted || storedPasskeys(content).length > 0,
       userId,
     });
 
@@ -734,14 +745,18 @@ class NoteService {
         { status: 409 }
       );
     }
+    const content =
+      data.content !== undefined ? mergeOnUpdate(note.content, data.content) : note.content;
     const payload: any = {
       title: data.title !== undefined ? data.title : note.title,
-      content: data.content !== undefined ? data.content : note.content,
+      content,
       category:
         data.category !== undefined ? storedCategory(data.category) : storedCategory(note.category),
       tags: data.tags !== undefined ? data.tags : note.tags,
+      // An item holding a private key is never stored in plain text.
       isEncrypted:
-        data.isEncrypted !== undefined ? data.isEncrypted : note.isEncrypted,
+        storedPasskeys(content).length > 0 ||
+        (data.isEncrypted !== undefined ? data.isEncrypted : note.isEncrypted),
     };
 
     const requested = this.requestedCollectionIds(data);
@@ -826,6 +841,75 @@ class NoteService {
     });
 
     return matches.slice(0, 20);
+  }
+
+  /**
+   * Passkeys that work on `host`, with their private keys: only for the browser
+   * extension, which signs the site's challenge with them.
+   */
+  async passkeysForSite(userId: number, host: string) {
+    const pageHost = String(host || "").trim().toLowerCase();
+    if (!/^[a-z0-9.-]+$/.test(pageHost)) {
+      throw Object.assign(new Error("Invalid site"), { status: 400 });
+    }
+
+    const noteIds = await this.autofillNoteIds(userId);
+    const notes = noteIds.length
+      ? await Note.findAll({
+          where: { id: { [Op.in]: noteIds }, category: { [Op.in]: ["password", "login"] } },
+          attributes: ["id", "title", "content", "isEncrypted"],
+        })
+      : [];
+
+    return notes.flatMap((note) => {
+      const content = note.content as any;
+      if (!content || content.decryptionFailed) return [];
+      return storedPasskeys(content)
+        .filter((passkey) => rpIdMatchesHost(passkey.rpId, pageHost))
+        .map((passkey) => ({ noteId: note.id, title: note.title, ...passkey }));
+    });
+  }
+
+  /**
+   * Keep a passkey the extension just made: on the login the person picked (they
+   * need edit access), or on a new login for the site.
+   */
+  async savePasskey(userId: number, input: { noteId?: number | null; passkey: unknown }) {
+    const passkey = cleanPasskey(input.passkey);
+    if (!passkey) {
+      throw Object.assign(new Error("This passkey could not be saved."), { status: 400 });
+    }
+
+    if (input.noteId) {
+      const access = await this.getNoteAccess(Number(input.noteId), userId);
+      if (!access || (access.permission !== "owner" && access.permission !== "edit")) {
+        throw Object.assign(new Error("You can't change that item."), { status: 403 });
+      }
+      const note = access.note;
+      if (isDecryptionFailure(note.content)) {
+        throw Object.assign(
+          new Error("This item could not be decrypted, so it cannot be changed."),
+          { status: 409 }
+        );
+      }
+      await note.update({ content: addPasskey(note.content, passkey), isEncrypted: true });
+      return { noteId: note.id, created: false };
+    }
+
+    const note = await this.createNote(userId, {
+      title: passkey.rpId,
+      category: "password",
+      content: {
+        mainContent: "",
+        customFields: [
+          ...(passkey.userName ? [{ label: "Username", value: passkey.userName }] : []),
+          { label: "URL", value: `https://${passkey.rpId}` },
+        ],
+        passkeys: [passkey],
+      },
+      tags: [],
+    });
+    return { noteId: note.id, created: true };
   }
 
   private async autofillNoteIds(userId: number) {

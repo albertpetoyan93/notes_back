@@ -17,6 +17,9 @@ router.get("/stats", NoteController.getNoteStats as RequestHandler);
 router.get("/projects", NoteController.getProjects as RequestHandler);
 
 router.get("/autofill", NoteController.autofill as RequestHandler);
+// Passkeys for other websites: the browser extension only.
+router.get("/passkeys", NoteController.passkeys as RequestHandler);
+router.post("/passkeys", NoteController.savePasskey as RequestHandler);
 router.get("/export", NoteController.exportNotes as RequestHandler);
 router.post("/import", NoteController.importNotes as RequestHandler);
 router.delete("/trash", NoteController.emptyTrash as RequestHandler);

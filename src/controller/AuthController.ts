@@ -11,7 +11,7 @@ import EmailService from "@src/services/EmailService";
 import logger from "jet-logger";
 import AuditService from "@src/services/AuditService";
 
-function publicUser(user: {
+export function publicUser(user: {
   id: number;
   username: string;
   email: string;
@@ -25,7 +25,7 @@ function publicUser(user: {
   };
 }
 
-function sessionMeta(req: Request): SessionMeta {
+export function sessionMeta(req: Request): SessionMeta {
   return { userAgent: req.get("user-agent"), ip: req.ip };
 }
 

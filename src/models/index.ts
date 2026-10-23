@@ -16,6 +16,7 @@ import CollectionShare from "./CollectionShare";
 import Company from "./Company";
 import CompanyMember from "./CompanyMember";
 import UserSession from "./UserSession";
+import UserPasskey from "./UserPasskey";
 import AuditEvent from "./AuditEvent";
 
 // Define all associations here to avoid circular dependencies
@@ -248,6 +249,9 @@ function setupAssociations() {
     onDelete: "cascade",
   });
 
+  User.hasMany(UserPasskey, { foreignKey: "userId", as: "passkeys", onDelete: "CASCADE" });
+  UserPasskey.belongsTo(User, { foreignKey: "userId", as: "user" });
+
   AuditEvent.belongsTo(User, { as: "actor", foreignKey: "actorId", constraints: false });
   AuditEvent.belongsTo(User, { as: "target", foreignKey: "targetUserId", constraints: false });
 }
@@ -264,6 +268,7 @@ export default {
   Company,
   CompanyMember,
   UserSession,
+  UserPasskey,
   AuditEvent,
   setupAssociations,
 };
