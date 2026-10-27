@@ -64,10 +64,14 @@ const isAuth: RequestHandler = async (
 
     req.user = { id: userId, userId, sessionId: sid, locked };
   } catch {
-    throw new CustomError(
-      "User is not authorized",
-      HttpStatusCodes.UNAUTHORIZED
-    );
+    // The code tells the app to refresh the access token and retry, even on
+    // routes where a plain 401 means a wrong password (unlock after idle time:
+    // the 15-minute access token has expired by then).
+    res.status(HttpStatusCodes.UNAUTHORIZED).send({
+      code: "session_expired",
+      message: "User is not authorized",
+    });
+    return;
   }
 
   const path = String(req.originalUrl || "").split("?")[0].replace(/\/+$/, "");
