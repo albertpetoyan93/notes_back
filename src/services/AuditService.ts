@@ -27,6 +27,15 @@ export const AUDIT_ACTIONS = [
   "session_unlocked",
   "unlock_failed",
   "auto_lock_changed",
+  "e2e_enabled",
+  "master_password_changed",
+  "recovery_key_replaced",
+  "recovered_with_key",
+  "items_encrypted",
+  "passkey_unlock_enabled",
+  "company_recovery_enabled",
+  "company_recovery_disabled",
+  "master_password_reset_by_admin",
   // Items
   "item_created",
   "item_updated",
@@ -56,11 +65,24 @@ export const AUDIT_ACTIONS = [
   "member_removed",
   "member_role_changed",
   "company_policy_changed",
+  // Billing
+  "trial_started",
+  "family_invited",
+  "family_joined",
+  "family_left",
+  "company_exported",
+  "discount_requested",
 ] as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];
 
 const ACCOUNT_ACTIONS: AuditAction[] = [
+  "trial_started",
+  "family_invited",
+  "family_joined",
+  "family_left",
+  "company_exported",
+  "discount_requested",
   "login",
   "login_failed",
   "two_factor_failed",
@@ -75,6 +97,15 @@ const ACCOUNT_ACTIONS: AuditAction[] = [
   "session_unlocked",
   "unlock_failed",
   "auto_lock_changed",
+  "e2e_enabled",
+  "master_password_changed",
+  "recovery_key_replaced",
+  "recovered_with_key",
+  "items_encrypted",
+  "passkey_unlock_enabled",
+  "company_recovery_enabled",
+  "company_recovery_disabled",
+  "master_password_reset_by_admin",
   "vault_exported",
   "vault_imported",
   "secret_link_created",
@@ -130,13 +161,15 @@ class AuditService {
           paranoid: false,
           attributes: ["title"],
         });
-        if (note) details.title = note.title;
+        // End-to-end items have no readable title; the app shows the one it opens.
+        if (note?.title) details.title = note.title;
       }
       if (input.collectionId && details.collectionName === undefined) {
         const collection = await Collection.findByPk(input.collectionId, {
-          attributes: ["name"],
+          attributes: ["name", "encName"],
         });
-        if (collection) details.collectionName = collection.name;
+        // An encrypted name stays out of the log; the app shows the one it opens.
+        if (collection && !collection.encName) details.collectionName = collection.name;
       }
 
       if (REPEATABLE.includes(input.action) && input.actorId) {
@@ -226,7 +259,7 @@ class AuditService {
 
     const collections = await Collection.findAll({
       where: { companyId },
-      attributes: ["id", "name", "companyShare"],
+      attributes: ["id", "name", "encName", "companyShare"],
       order: [["name", "ASC"]],
     });
     const shares = await CollectionShare.findAll({
@@ -247,7 +280,8 @@ class AuditService {
     const accessible = collections
       .map((collection) => ({
         id: collection.id,
-        name: collection.name,
+        // Empty while encrypted: the app fills in the name it can open.
+        name: collection.encName ? "" : collection.name,
         permission: manager
           ? "edit"
           : shareByCollection.get(collection.id) || collection.companyShare || null,
@@ -273,7 +307,8 @@ class AuditService {
       const noteId = event.noteId as number;
       const entry = byNote.get(noteId) || {
         noteId,
-        title: String(event.details?.title || "Item"),
+        // Empty for end-to-end items: the app fills in the title it can open.
+        title: String(event.details?.title || ""),
         count: 0,
         lastAt: event.createdAt,
       };

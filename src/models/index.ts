@@ -21,6 +21,10 @@ import BreachResult from "./BreachResult";
 import NoteVersion from "./NoteVersion";
 import SecretLink from "./SecretLink";
 import AuditEvent from "./AuditEvent";
+import Subscription from "./Subscription";
+import TrialUsed from "./TrialUsed";
+import FamilyMember from "./FamilyMember";
+import DiscountRequest from "./DiscountRequest";
 
 // Define all associations here to avoid circular dependencies
 function setupAssociations() {
@@ -283,5 +287,9 @@ export default {
   NoteVersion,
   SecretLink,
   AuditEvent,
+  Subscription,
+  TrialUsed,
+  FamilyMember,
+  DiscountRequest,
   setupAssociations,
 };

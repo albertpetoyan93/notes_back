@@ -1,6 +1,6 @@
 import { NextFunction, Request, Response } from "express";
 import HttpStatusCodes from "../common/HttpStatusCodes";
-import AuthService from "../services/AuthService";
+import AuthService, { E2E_REQUIRED, MASTER_RESET_REFUSED } from "../services/AuthService";
 import { AuthRequest } from "@src/types";
 import UserService from "@src/services/UserService";
 import { clearAuthCookies, setAuthCookies } from "@src/util/authCookies";
@@ -11,18 +11,22 @@ import EmailService from "@src/services/EmailService";
 import logger from "jet-logger";
 import AuditService from "@src/services/AuditService";
 import CompanyPolicyService from "@src/services/CompanyPolicyService";
+import E2EAccountService, { E2EError, e2eDeadline } from "@src/services/E2EAccountService";
+import { isAdminEmail } from "@src/services/DiscountService";
 
 export function publicUser(user: {
   id: number;
   username: string;
   email: string;
   fullName?: string | null;
+  e2eEnabled?: boolean;
 }) {
   return {
     id: user.id,
     username: user.username,
     email: user.email,
     fullName: user.fullName,
+    e2eEnabled: Boolean(user.e2eEnabled),
   };
 }
 
@@ -58,9 +62,9 @@ export default class AuthController {
             "apiKey": []
     }] */
     try {
-      const { email, password } = req.body;
+      const { email, password, authKey } = req.body;
 
-      const user = await AuthService.login({ email, password });
+      const user = await AuthService.login({ email, password, authKey });
       if (user.twoFactorEnabled) {
         res.status(HttpStatusCodes.OK).send({
           twoFactorRequired: true,
@@ -77,7 +81,12 @@ export default class AuthController {
         user: publicUser(user),
       });
     } catch (e: any) {
-      if (e.message === "Invalid credentials") {
+      if (e.message === E2E_REQUIRED) {
+        res.status(HttpStatusCodes.BAD_REQUEST).send({
+          code: "e2e_required",
+          message: "This account uses a master password. Reload the page to sign in.",
+        });
+      } else if (e.message === "Invalid credentials") {
         await recordFailedLogin(req, "web");
         res.status(HttpStatusCodes.UNAUTHORIZED).send({ message: e.message });
       } else {
@@ -89,13 +98,24 @@ export default class AuthController {
   static register = async (req: Request, res: Response, next: NextFunction) => {
     // #swagger.tags = ["Auth"]
     try {
-      const { username, email, password, fullName } = req.body;
+      const { username, email, fullName, e2e } = req.body;
+      // Every new account is end-to-end (stage 10.6): the browser makes the
+      // keys, and the password itself never arrives here.
+      if (!e2e) {
+        res.status(HttpStatusCodes.BAD_REQUEST).send({
+          code: "e2e_required",
+          message: "Create your account in the 2keevo app: it sets up your encryption keys.",
+        });
+        return;
+      }
+      const keys = await E2EAccountService.checkedBundle(e2e);
 
       const user = await AuthService.register({
         username,
         email,
-        password,
+        password: keys.password,
         fullName,
+        e2e: keys,
       });
 
       const session = await AuthService.issueSession(user, sessionMeta(req));
@@ -106,6 +126,10 @@ export default class AuthController {
         user: publicUser(user),
       });
     } catch (e: any) {
+      if (e instanceof E2EError) {
+        res.status(e.status).send({ message: e.message });
+        return;
+      }
       if (e.message === "Username or email already exists") {
         res.status(HttpStatusCodes.BAD_REQUEST).send({
           message: e.message,
@@ -122,8 +146,8 @@ export default class AuthController {
     next: NextFunction
   ) => {
     try {
-      const { email, password } = req.body;
-      const user = await AuthService.login({ email, password });
+      const { email, password, authKey } = req.body;
+      const user = await AuthService.login({ email, password, authKey });
       if (user.twoFactorEnabled) {
         res.status(HttpStatusCodes.OK).send({
           twoFactorRequired: true,
@@ -149,7 +173,13 @@ export default class AuthController {
         refreshToken: session.refreshToken,
       });
     } catch (e: any) {
-      if (e.message === "Invalid credentials") {
+      if (e.message === E2E_REQUIRED) {
+        // The popup can't derive keys yet (stage 10.5): sign in through the web app.
+        res.status(HttpStatusCodes.BAD_REQUEST).send({
+          code: "e2e_required",
+          message: 'This account uses end-to-end encryption. Use "Sign in with the 2keevo web app".',
+        });
+      } else if (e.message === "Invalid credentials") {
         await recordFailedLogin(req, "extension");
         res.status(HttpStatusCodes.UNAUTHORIZED).send({ message: e.message });
       } else {
@@ -243,7 +273,8 @@ export default class AuthController {
     } catch (e: any) {
       if (
         e.message === "This reset link is invalid or has expired." ||
-        e.message === "Password must be at least 6 characters."
+        e.message === "Password must be at least 6 characters." ||
+        e.message === MASTER_RESET_REFUSED
       ) {
         res.status(HttpStatusCodes.BAD_REQUEST).send({ message: e.message });
       } else {
@@ -566,6 +597,10 @@ export default class AuthController {
         autoLockMinutes: CompanyPolicyService.effectiveAutoLock(user.autoLockMinutes ?? 15, rules),
         autoLockLimit: rules.maxIdleMinutes,
         locked: Boolean((req.user as { locked?: boolean } | undefined)?.locked),
+        // 2keevo's own admins see the admin view (ADMIN_EMAILS).
+        ...(isAdminEmail(user.email) ? { isAdmin: true } : {}),
+        // Accounts without end-to-end encryption must turn it on by then (E2E_DEADLINE).
+        ...(!user.e2eEnabled && e2eDeadline() ? { e2eDeadline: e2eDeadline() } : {}),
       });
     } catch (e) {
       next(e);

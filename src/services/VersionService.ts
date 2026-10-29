@@ -96,6 +96,24 @@ class VersionService {
     });
   }
 
+  /**
+   * A version of an end-to-end item: the browser sealed the whole state (and
+   * what changed) with the item key, so the server stores it as it is.
+   */
+  async storeSealed(noteId: number, encData: string, changedBy: number) {
+    await NoteVersion.create({
+      noteId,
+      title: "",
+      category: "note",
+      tags: [],
+      content: encData,
+      changes: [],
+      changedBy,
+      e2e: true,
+    });
+    await this.prune(noteId);
+  }
+
   /** The newest KEEP_VERSIONS, and nothing older than a year except the newest. */
   private async prune(noteId: number) {
     await sequelize.query(
@@ -127,7 +145,7 @@ class VersionService {
   async list(noteId: number) {
     const rows = await NoteVersion.findAll({
       where: { noteId },
-      attributes: ["id", "createdAt", "changes", "changedBy", "title"],
+      attributes: ["id", "createdAt", "changes", "changedBy", "title", "e2e", "content"],
       include: [{ model: User, as: "author", attributes: ["id", "username", "fullName"] }],
       order: [["createdAt", "DESC"], ["id", "DESC"]],
     });
@@ -140,6 +158,8 @@ class VersionService {
         changes: row.changes || [],
         current: index === 0,
         changedBy: author ? { id: author.id, name: author.fullName || author.username } : null,
+        // Sealed: the browser opens it for the name and the changes.
+        ...(row.e2e ? { e2e: true, encData: row.content } : {}),
       };
     });
   }
@@ -151,6 +171,11 @@ class VersionService {
       include: [{ model: User, as: "author", attributes: ["id", "username", "fullName"] }],
     });
     if (!row) return null;
+    const author = row.get("author") as User | null;
+    const changedBy = author ? { id: author.id, name: author.fullName || author.username } : null;
+    if (row.e2e) {
+      return { id: row.id, createdAt: row.createdAt, e2e: true, encData: row.content, changedBy };
+    }
     let content: any = decryptContent(row.content);
     if (typeof content === "string") {
       try {
@@ -159,7 +184,6 @@ class VersionService {
         /* Plain text content stays a string. */
       }
     }
-    const author = row.get("author") as User | null;
     return {
       id: row.id,
       createdAt: row.createdAt,
@@ -168,7 +192,7 @@ class VersionService {
       tags: row.tags || [],
       content,
       changes: row.changes || [],
-      changedBy: author ? { id: author.id, name: author.fullName || author.username } : null,
+      changedBy,
     };
   }
 }

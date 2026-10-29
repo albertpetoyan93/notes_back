@@ -1,4 +1,5 @@
 import { Op } from "sequelize";
+import EntitlementService from "./EntitlementService";
 import CompanyPolicyService from "./CompanyPolicyService";
 import Collection from "../models/Collection";
 import CollectionNote from "../models/CollectionNote";
@@ -9,6 +10,8 @@ import Note from "../models/Note";
 import User from "../models/User";
 import { SharePermission } from "../models/NoteShare";
 import NotificationService from "./NotificationService";
+import E2EItemService, { collectionLabel, nameFields, placeholderName, assertEncName } from "./E2EItemService";
+import CollectionKey from "../models/CollectionKey";
 
 class CollectionService {
   private activeShareFilter(where: Record<string, unknown>) {
@@ -82,10 +85,12 @@ class CollectionService {
 
     const ids = collections.map((collection) => collection.id);
     const countById = await this.noteCounts(ids);
+    const myKeys = await this.myCollectionKeys(userId, ids);
 
     return collections.map((collection) => ({
       id: collection.id,
-      name: collection.name,
+      // Encrypted names come with the caller's way to open them.
+      ...nameFields(collection, myKeys.get(collection.id)),
       isOwner: collection.userId === userId,
       permission:
         collection.userId === userId
@@ -95,8 +100,28 @@ class CollectionService {
     }));
   }
 
-  async create(userId: number, name: string) {
-    const trimmed = name.trim();
+  /** The caller's copies of these collections' keys (for opening encrypted names). */
+  private async myCollectionKeys(userId: number, ids: number[]) {
+    const rows = ids.length
+      ? await CollectionKey.findAll({ where: { userId, collectionId: { [Op.in]: ids } } })
+      : [];
+    return new Map(rows.map((row) => [row.collectionId, row]));
+  }
+
+  /**
+   * A name sent encrypted with the owner's user key (end-to-end accounts):
+   * the server stores it as it is, behind a placeholder. It can't check for a
+   * duplicate; the app does, among the names it can open.
+   */
+  private encryptedName(enc: any, allowed = "user") {
+    if (!enc?.encName) return null;
+    if (enc.nameKey !== allowed) throw Object.assign(new Error("Reload the page, then try again."), { status: 409 });
+    return { name: placeholderName(), encName: assertEncName(enc.encName), nameKey: allowed };
+  }
+
+  async create(userId: number, name: string, enc?: unknown) {
+    const sealed = this.encryptedName(enc);
+    const trimmed = sealed ? sealed.name : name.trim();
     if (!trimmed) {
       throw Object.assign(new Error("Collection name is required"), {
         status: 400,
@@ -106,6 +131,9 @@ class CollectionService {
     const existing = await Collection.findOne({
       where: { userId, name: trimmed, companyId: { [Op.is]: null } },
     });
+    // Free plan: a few collections. Existing ones always keep working.
+    const owned = await Collection.count({ where: { userId, companyId: { [Op.is]: null } } });
+    await EntitlementService.assertCanCreateCollection(userId, owned);
     if (existing) {
       throw Object.assign(
         new Error(`You already have a collection named "${trimmed}"`),
@@ -117,10 +145,11 @@ class CollectionService {
       userId,
       name: trimmed.slice(0, 100),
       companyId: null,
+      ...(sealed ? { encName: sealed.encName, nameKey: sealed.nameKey } : {}),
     });
     return {
       id: collection.id,
-      name: collection.name,
+      ...nameFields(collection),
       isOwner: true,
       permission: "owner" as const,
       noteCount: 0,
@@ -179,6 +208,7 @@ class CollectionService {
       peopleByCollection.set(share.collectionId, list);
     }
     const countById = await this.noteCounts(ids);
+    const myKeys = await this.myCollectionKeys(userId, ids);
     const visible =
       access.role === "member"
         ? collections.filter(
@@ -199,7 +229,7 @@ class CollectionService {
           : ("owner" as const);
       return {
         id: collection.id,
-        name: collection.name,
+        ...nameFields(collection, myKeys.get(collection.id)),
         noteCount: countById.get(collection.id) || 0,
         permission,
         companyShare,
@@ -417,9 +447,19 @@ class CollectionService {
     });
   }
 
-  async rename(collectionId: number, userId: number, name: string) {
+  async rename(collectionId: number, userId: number, name: string, enc?: unknown) {
     const access = await this.getAccess(collectionId, userId);
     if (!access || access.permission !== "owner") return null;
+
+    // An encrypted name stays encrypted the same way (user key, or the current collection key).
+    const sealed = access.collection.nameKey ? this.encryptedName(enc, access.collection.nameKey) : null;
+    if (sealed) {
+      await access.collection.update({ encName: sealed.encName });
+      return { ...access.collection.toJSON(), ...nameFields(access.collection) };
+    }
+    if (access.collection.encName) {
+      throw Object.assign(new Error("Reload the page, then rename the collection."), { status: 409 });
+    }
 
     const trimmed = name.trim();
     if (!trimmed) {
@@ -468,6 +508,7 @@ class CollectionService {
     for (const noteId of noteIds) {
       await this.restorePrimaryCollection(noteId);
     }
+    await E2EItemService.dropCollection(collectionId);
     await access.collection.destroy();
     return true;
   }
@@ -486,7 +527,7 @@ class CollectionService {
     return access;
   }
 
-  async addNotes(collectionId: number, userId: number, noteIds: number[]) {
+  async addNotes(collectionId: number, userId: number, noteIds: number[], e2eKeys?: unknown) {
     const access = await this.assertCanAdd(collectionId, userId);
     const ids = [...new Set(noteIds.map(Number).filter((id) => !isNaN(id)))];
     if (!ids.length) {
@@ -503,9 +544,16 @@ class CollectionService {
         status: 400,
       });
     }
+    // End-to-end items need a key copy for this collection (made in the browser).
+    const current = await this.collectionsByNoteId(notes.map((note) => note.id));
+    await E2EItemService.ensure(userId, notes.map((note) => note.id), e2eKeys, {
+      collectionsByNote: new Map(
+        notes.map((note) => [note.id, [...(current.get(note.id) || []).map((item) => item.id), collectionId]])
+      ),
+    });
 
     for (const note of notes) {
-      await this.addNoteToCollection(note.id, collectionId, access.collection.name);
+      await this.addNoteToCollection(note.id, collectionId, collectionLabel(access.collection));
     }
 
     return { added: notes.length, skipped: ids.length - notes.length };
@@ -525,6 +573,7 @@ class CollectionService {
     if (!canRemove) return false;
 
     await CollectionNote.destroy({ where: { collectionId, noteId } });
+    await E2EItemService.dropItemKey(noteId, "collection", collectionId);
     if (note.collectionId === collectionId) {
       await note.update({ collectionId: null, project: null });
       await this.restorePrimaryCollection(noteId);
@@ -540,7 +589,8 @@ class CollectionService {
         userId,
         ...(linkedIds.length ? { id: { [Op.notIn]: linkedIds } } : {}),
       },
-      attributes: ["id", "title", "collectionId"],
+      // End-to-end items have no readable title: the browser opens encData.
+      attributes: ["id", "title", "collectionId", "e2e", "e2eId", "itemKey", "encData"],
       order: [["title", "ASC"]],
     });
     return notes;
@@ -590,7 +640,7 @@ class CollectionService {
         {
           model: Collection,
           as: "collection",
-          attributes: ["id", "name", "companyId"],
+          attributes: ["id", "name", "encName", "companyId"],
         },
       ],
     });
@@ -601,7 +651,7 @@ class CollectionService {
       if (!list.some((item) => item.id === collection.id)) {
         list.push({
           id: collection.id,
-          name: collection.name,
+          name: collectionLabel(collection),
           companyId: collection.companyId ?? null,
         });
       }
@@ -616,7 +666,7 @@ class CollectionService {
           {
             model: Collection,
             as: "collection",
-            attributes: ["id", "name", "companyId"],
+            attributes: ["id", "name", "encName", "companyId"],
           },
         ],
       });
@@ -626,7 +676,7 @@ class CollectionService {
         map.set(note.id, [
           {
             id: collection.id,
-            name: collection.name,
+            name: collectionLabel(collection),
             companyId: collection.companyId ?? null,
           },
         ]);
@@ -637,6 +687,12 @@ class CollectionService {
 
   async setNoteCollections(noteId: number, collectionIds: number[]) {
     const ids = [...new Set(collectionIds.filter((id) => Number.isInteger(id)))];
+    // Key copies for collections the item leaves go with it.
+    const left = await CollectionNote.findAll({
+      where: { noteId, ...(ids.length ? { collectionId: { [Op.notIn]: ids } } : {}) },
+      attributes: ["collectionId"],
+    });
+    for (const link of left) await E2EItemService.dropItemKey(noteId, "collection", link.collectionId);
     await CollectionNote.destroy({ where: { noteId } });
     if (ids.length) {
       await CollectionNote.bulkCreate(
@@ -657,7 +713,8 @@ class CollectionService {
     });
     const note = await Note.findByPk(noteId);
     if (note && !note.collectionId) {
-      await note.update({ collectionId, project: name });
+      // An encrypted name isn't copied onto the item.
+      await note.update({ collectionId, project: name || null });
     }
   }
 
@@ -740,6 +797,9 @@ class CollectionService {
     let share = await CollectionShare.findOne({
       where: { collectionId, sharedWithUserId: recipient.id },
     });
+    if (!collection.companyId) {
+      await this.assertPlanAllowsShares(ownerId, collectionId, share ? 0 : 1, expiresAt, share?.expiresAt);
+    }
     if (share) {
       await share.update({ permission, expiresAt });
     } else {
@@ -758,7 +818,9 @@ class CollectionService {
     const ownerName = owner?.fullName || owner?.username || "Someone";
     await NotificationService.create(
       recipient.id,
-      `${ownerName} shared the collection "${collection.name}" with you`
+      collectionLabel(collection)
+        ? `${ownerName} shared the collection "${collectionLabel(collection)}" with you`
+        : `${ownerName} shared a collection with you`
     );
 
     return CollectionShare.findByPk(share.id, {
@@ -772,18 +834,59 @@ class CollectionService {
     });
   }
 
+  /** Plan limits for sharing a personal collection: people, and end dates. */
+  private async assertPlanAllowsShares(
+    ownerId: number,
+    collectionId: number,
+    adding: number,
+    expiresAt: Date | null,
+    previousExpiry?: Date | null
+  ) {
+    const current = await CollectionShare.count({
+      where: {
+        collectionId,
+        [Op.or]: [{ expiresAt: null }, { expiresAt: { [Op.gt]: new Date() } }],
+      },
+    });
+    await EntitlementService.assertCanShareWith(ownerId, current, adding);
+    const changedExpiry =
+      !!expiresAt && (!previousExpiry || new Date(previousExpiry).getTime() !== expiresAt.getTime());
+    if (changedExpiry) await EntitlementService.assertCanUseShareExpiry(ownerId);
+  }
+
   async shareWithMany(
     collectionId: number,
     ownerId: number,
     identifiers: string[],
     permission: SharePermission = "view",
-    expiresAt: Date | null = null
+    expiresAt: Date | null = null,
+    e2eKeys?: unknown
   ) {
     const unique = [
       ...new Set(identifiers.map((id) => id?.trim()).filter(Boolean)),
     ] as string[];
     const shared: any[] = [];
     const failed: { identifier: string; message: string }[] = [];
+    // Before the per-person loop, which reports errors as failed people.
+    const owned = await Collection.findOne({ where: { id: collectionId, userId: ownerId }, attributes: ["id", "companyId"] });
+    if (owned && !owned.companyId && unique.length) {
+      const people = await User.findAll({
+        where: { [Op.or]: [{ email: { [Op.in]: unique } }, { username: { [Op.in]: unique } }] },
+        attributes: ["id"],
+      });
+      const already = await CollectionShare.findAll({
+        where: { collectionId, sharedWithUserId: { [Op.in]: people.map((person) => person.id) } },
+        attributes: ["sharedWithUserId"],
+      });
+      await this.assertPlanAllowsShares(ownerId, collectionId, people.length - already.length, expiresAt);
+    }
+    if (owned && unique.length) {
+      const recipients = await User.findAll({
+        where: { [Op.or]: [{ email: { [Op.in]: unique } }, { username: { [Op.in]: unique } }] },
+        attributes: ["id"],
+      });
+      await E2EItemService.ensureCollectionShare(ownerId, collectionId, recipients.map((user) => user.id), e2eKeys);
+    }
 
     for (const identifier of unique) {
       try {
@@ -822,7 +925,7 @@ class CollectionService {
     if (!deleted) {
       throw Object.assign(new Error("This collection is not shared with you"), { status: 404 });
     }
-    return { name: collection.name, ownerId: collection.userId };
+    return { name: collectionLabel(collection), ownerId: collection.userId };
   }
 
   async revoke(collectionId: number, ownerId: number, sharedWithUserId: number) {
@@ -854,7 +957,7 @@ class CollectionService {
         {
           model: Collection,
           as: "collection",
-          attributes: ["id", "name", "companyId"],
+          attributes: ["id", "name", "encName", "companyId"],
         },
       ],
     });
@@ -865,7 +968,7 @@ class CollectionService {
       collections.find((collection) => !collection.companyId) || collections[0];
     if (!primary) return;
     await Note.update(
-      { collectionId: primary.id, project: primary.name },
+      { collectionId: primary.id, project: collectionLabel(primary) || null },
       { where: { id: noteId, collectionId: { [Op.is]: null } } }
     );
   }

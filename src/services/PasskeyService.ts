@@ -101,8 +101,12 @@ export function publicPasskey(passkey: UserPasskey) {
     synced: passkey.deviceType === "multiDevice" || passkey.backedUp,
     createdAt: passkey.createdAt,
     lastUsedAt: passkey.lastUsedAt || null,
+    // End-to-end accounts: this passkey also opens the vault (PRF).
+    unlocksVault: !!passkey.prfUserKey,
   };
 }
+
+const WRAPPED_KEY = /^e2e1\.[A-Za-z0-9_-]{16}\.[A-Za-z0-9_-]{40,100}$/;
 
 class PasskeyService {
   static async list(userId: number) {
@@ -253,6 +257,24 @@ class PasskeyService {
     const user = await User.findByPk(passkey.userId);
     if (!user) throw new PasskeyError("Could not verify this passkey. Try again.");
     return { user, passkey };
+  }
+
+  /**
+   * Let this passkey open the vault: the browser proved it holds the passkey
+   * (a fresh signature) and sends the user key wrapped with its PRF secret.
+   */
+  static async saveUnlockKey(userId: number, challengeToken: unknown, response: AuthenticationResponseJSON, prfUserKey: unknown) {
+    const text = String(prfUserKey || "");
+    if (!WRAPPED_KEY.test(text)) throw new PasskeyError("That unlock key isn't valid.");
+    const { user, passkey } = await this.authenticate(challengeToken, response);
+    if (user.id !== userId || !user.e2eEnabled) throw new PasskeyError("That passkey belongs to another account.");
+    await passkey.update({ prfUserKey: text });
+    return publicPasskey(passkey);
+  }
+
+  /** The user key changed (end-to-end turned on again, or off): old unlock copies are useless. */
+  static async forgetUnlockKeys(userId: number, transaction?: any) {
+    await UserPasskey.update({ prfUserKey: null }, { where: { userId }, transaction });
   }
 
   static async rename(userId: number, id: number, name: unknown) {

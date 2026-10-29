@@ -1,13 +1,25 @@
 import { Router, RequestHandler } from "express";
 import isAuth from "../middlwares/isAuth";
 import CompanyController from "../controller/CompanyController";
+import CompanyRecoveryController from "../controller/CompanyRecoveryController";
 
 const router = Router();
 
 router.use(isAuth);
 router.get("/", CompanyController.list as RequestHandler);
 router.post("/", CompanyController.create as RequestHandler);
+// Admin recovery: background work for this person's browser (before "/:id").
+router.get("/recovery/tasks", CompanyRecoveryController.tasks as RequestHandler);
+router.post("/recovery/enroll", CompanyRecoveryController.enroll as RequestHandler);
+router.post("/recovery/grant", CompanyRecoveryController.grant as RequestHandler);
+router.post("/recovery/rotate", CompanyRecoveryController.rotate as RequestHandler);
 router.put("/:id", CompanyController.rename as RequestHandler);
+// Admin recovery for one company: status, on/off (owner), resetting a member (owners and admins).
+router.get("/:id/recovery", CompanyRecoveryController.status as RequestHandler);
+router.post("/:id/recovery/enable", CompanyRecoveryController.enable as RequestHandler);
+router.post("/:id/recovery/disable", CompanyRecoveryController.disable as RequestHandler);
+router.get("/:id/recovery/members/:userId", CompanyRecoveryController.memberKeys as RequestHandler);
+router.post("/:id/recovery/members/:userId", CompanyRecoveryController.reset as RequestHandler);
 // Security policies: owners and admins.
 router.get("/:id/policies", CompanyController.policies as RequestHandler);
 router.put("/:id/policies", CompanyController.updatePolicies as RequestHandler);
@@ -18,6 +30,8 @@ router.delete(
   "/:id/collections/:collectionId/share",
   CompanyController.unshareCollection as RequestHandler
 );
+// The owner can always take the company's items out (also while suspended).
+router.get("/:id/export", CompanyController.exportItems as RequestHandler);
 router.get("/:id/members", CompanyController.members as RequestHandler);
 router.get("/:id/activity", CompanyController.activity as RequestHandler);
 router.get(

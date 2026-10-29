@@ -11,6 +11,12 @@ const MAX_VIEWS = 10;
 // 50 KB of secret, base64url-encoded with the GCM tag.
 const MAX_CIPHERTEXT = 70_000;
 const B64URL = /^[A-Za-z0-9_-]+$/;
+// A passphrase proof: 32 bytes, base64url.
+const PROOF = /^[A-Za-z0-9_-]{43}$/;
+// Wrong passphrases a link survives.
+const MAX_ATTEMPTS = 5;
+
+const proofHash = (proof: string) => crypto.createHash("sha256").update(proof).digest("hex");
 
 export class SecretLinkError extends Error {
   constructor(message: string, public status = 400) {
@@ -43,13 +49,14 @@ class SecretLinkService {
     const ciphertext = String(input?.ciphertext || "");
     const iv = String(input?.iv || "");
     const salt = input?.salt ? String(input.salt) : null;
-    const check = input?.check ? String(input.check) : null;
+    const proof = input?.proof ? String(input.proof) : null;
     if (!ciphertext || !B64URL.test(ciphertext) || ciphertext.length > MAX_CIPHERTEXT) {
       throw new SecretLinkError("The secret is missing or too large (50 KB at most).");
     }
     if (!B64URL.test(iv) || iv.length > 32) throw new SecretLinkError("Bad encryption data.");
     if (salt && (!B64URL.test(salt) || salt.length > 64)) throw new SecretLinkError("Bad passphrase data.");
-    if (Boolean(salt) !== Boolean(check) || (check && (check.length > 200 || !/^[A-Za-z0-9_.-]+$/.test(check)))) {
+    // With a passphrase, the server checks a proof of it (never the passphrase).
+    if (Boolean(salt) !== Boolean(proof) || (proof && !PROOF.test(proof))) {
       throw new SecretLinkError("Bad passphrase data.");
     }
 
@@ -76,7 +83,7 @@ class SecretLinkService {
       ciphertext,
       iv,
       salt,
-      check,
+      proofHash: proof ? proofHash(proof) : null,
       label: label ? encrypt(label) : null,
       maxViews,
       expiresAt: new Date(Date.now() + hours * 60 * 60 * 1000),
@@ -122,7 +129,8 @@ class SecretLinkService {
     return {
       expiresAt: link.expiresAt,
       viewsLeft: link.maxViews - link.viewCount,
-      passphrase: link.salt ? { salt: link.salt, check: link.check } : null,
+      // Older links let the page check the passphrase; newer ones send a proof to /open.
+      passphrase: link.salt ? { salt: link.salt, ...(link.proofHash ? {} : { check: link.check }) } : null,
     };
   }
 
@@ -130,7 +138,8 @@ class SecretLinkService {
    * Hand out the ciphertext and count the view, in one statement, so two
    * people can't both open a one-time link. The last view wipes it.
    */
-  async open(id: string) {
+  async open(id: string, proof?: unknown) {
+    await this.checkPassphrase(String(id).slice(0, 32), proof);
     const rows = await sequelize.query<{
       ciphertext: string;
       iv: string;
@@ -170,6 +179,29 @@ class SecretLinkService {
       label,
       noteId: row.noteId,
     };
+  }
+
+  /**
+   * For links with a passphrase: the proof must match before a view is used.
+   * Wrong ones are counted; the fifth destroys the link, so guessing ends there.
+   */
+  private async checkPassphrase(id: string, proof: unknown) {
+    const link = await SecretLink.findByPk(id, { attributes: ["id", "proofHash"] });
+    if (!link?.proofHash) return;
+    const sent = typeof proof === "string" && PROOF.test(proof) ? proofHash(proof) : "";
+    if (sent && crypto.timingSafeEqual(Buffer.from(sent), Buffer.from(link.proofHash))) return;
+    const rows = await sequelize.query<{ failedAttempts: number }>(
+      `UPDATE "secret_links" SET "failedAttempts" = "failedAttempts" + 1
+       WHERE id = :id AND ciphertext IS NOT NULL RETURNING "failedAttempts"`,
+      { replacements: { id }, type: QueryTypes.SELECT }
+    );
+    const failed = rows[0]?.failedAttempts ?? MAX_ATTEMPTS;
+    if (failed >= MAX_ATTEMPTS) {
+      await SecretLink.update({ ciphertext: null, revokedAt: new Date() }, { where: { id } });
+      throw new SecretLinkError("Too many wrong passphrases, so this link was destroyed. Ask the sender for a new one.", 404);
+    }
+    const left = MAX_ATTEMPTS - failed;
+    throw new SecretLinkError(`That passphrase isn't right. ${left} ${left === 1 ? "try" : "tries"} left.`, 403);
   }
 
   // Expired links lose their content; long-gone ones are deleted.

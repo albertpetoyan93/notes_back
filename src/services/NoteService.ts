@@ -14,8 +14,10 @@ import { Op } from "sequelize";
 import sequelize from "../configs/DB/sequelize";
 import { isDecryptionFailure } from "../util/encryption";
 import AccessService from "./AccessService";
+import EntitlementService from "./EntitlementService";
 import VersionService, { type ItemState } from "./VersionService";
 import CompanyPolicyService from "./CompanyPolicyService";
+import E2EItemService, { BLANK_FIELDS, assertEncData, assertSealed, collectionLabel } from "./E2EItemService";
 import {
   addPasskey,
   cleanOnCreate,
@@ -88,6 +90,12 @@ interface CreateNoteData {
   isEncrypted?: boolean;
   collectionId?: number | null;
   collectionIds?: number[];
+  /** End-to-end item (stage 10.3): sealed in the browser. */
+  e2e?: { e2eId: string; itemKey: string; encData: string } | null;
+  /** Its first version, sealed with the item key. */
+  version?: string;
+  /** Key copies the browser made for its collections (see E2EItemService). */
+  e2eKeys?: unknown;
 }
 
 interface UpdateNoteData {
@@ -109,6 +117,10 @@ interface UpdateNoteData {
   isEncrypted?: boolean;
   collectionId?: number | null;
   collectionIds?: number[];
+  /** New sealed state of an end-to-end item, and the version to keep. */
+  encData?: string;
+  version?: string;
+  e2eKeys?: unknown;
 }
 
 function storedCategory<T extends string | undefined>(category: T): T {
@@ -146,7 +158,7 @@ class NoteService {
       {
         model: Collection,
         as: "collection",
-        attributes: ["id", "name", "companyId"],
+        attributes: ["id", "name", "encName", "companyId"],
         required: false,
       },
     ];
@@ -296,7 +308,7 @@ class NoteService {
         ? [
             {
               id: json.collection.id,
-              name: json.collection.name,
+              name: json.collection.encName ? "" : json.collection.name,
               companyId: json.collection.companyId ?? null,
             },
           ]
@@ -447,9 +459,11 @@ class NoteService {
     const collectionsByNoteId = await CollectionService.collectionsByNoteId(
       notes.map((note) => note.id)
     );
-    const passwordHealthById = filters?.trash
-      ? new Map<number, PasswordHealth>()
-      : await this.passwordHealthByNoteId(userId);
+    // The password health report is part of paid plans.
+    const passwordHealthById =
+      filters?.trash || !(await EntitlementService.hasPasswordHealth(userId))
+        ? new Map<number, PasswordHealth>()
+        : await this.passwordHealthByNoteId(userId);
 
     // Shown to whoever manages access: the owner, or company owners/admins.
     const managedCompanies = await this.managedCompanyIds(userId);
@@ -467,15 +481,13 @@ class NoteService {
       managedCompanies
     );
     const directIds = await this.directlySharedIds(userId, notes.map((note) => note.id));
+    const keyPaths = await E2EItemService.keyPathsFor(userId, notes);
     const search = String(filters?.search || "").trim().toLowerCase();
     return notes
       .map((note) => {
-        const annotated = this.annotateNote(
-          note,
-          userId,
-          permissionByNoteId,
-          favoriteNoteIds,
-          collectionsByNoteId.get(note.id)
+        const annotated = this.withKeyPaths(
+          this.annotateNote(note, userId, permissionByNoteId, favoriteNoteIds, collectionsByNoteId.get(note.id)),
+          keyPaths
         );
         const passwordHealth = passwordHealthById.get(note.id);
         const accessCount = accessCounts.get(note.id);
@@ -487,6 +499,23 @@ class NoteService {
         return passwordHealth ? { ...withDirect, passwordHealth } : withDirect;
       })
       .filter((note) => !search || this.matchesSearch(note, search));
+  }
+
+  /**
+   * An end-to-end item opens with its owner's copy of the key (itemKey), or for
+   * anyone else through a share or a collection (e2eKeys). Each person gets
+   * only their own ways in.
+   */
+  private withKeyPaths<T extends { id: number; e2e?: boolean; isOwner: boolean; itemKey?: string | null }>(
+    note: T,
+    keyPaths: Map<number, unknown>
+  ) {
+    if (!note.e2e) return note;
+    return {
+      ...note,
+      itemKey: note.isOwner ? note.itemKey : null,
+      e2eKeys: keyPaths.get(note.id) || { collections: [] },
+    };
   }
 
   /**
@@ -530,12 +559,9 @@ class NoteService {
     const collections = await CollectionService.collectionsByNoteId([
       access.note.id,
     ]);
-    const annotated = this.annotateNote(
-      access.note,
-      userId,
-      permissionByNoteId,
-      favoriteNoteIds,
-      collections.get(access.note.id)
+    const annotated = this.withKeyPaths(
+      this.annotateNote(access.note, userId, permissionByNoteId, favoriteNoteIds, collections.get(access.note.id)),
+      await E2EItemService.keyPathsFor(userId, [access.note])
     );
     if (annotated.isOwner) return annotated;
     const directIds = await this.directlySharedIds(userId, [access.note.id]);
@@ -585,6 +611,22 @@ class NoteService {
       const names = linked.map(
         (collection) => collection.name
       );
+      if (note.e2e) {
+        // Opened by the browser, which holds the keys.
+        exported.push({
+          e2e: true,
+          e2eId: note.e2eId,
+          itemKey: note.itemKey,
+          encData: note.encData,
+          category: note.category,
+          collection: names[0] || null,
+          collections: names,
+          // Encrypted names come empty: the app fills them in by id.
+          collectionIds: linked.map((collection) => collection.id),
+          isFavorite: favoriteNoteIds.has(note.id),
+        });
+        continue;
+      }
       exported.push({
         title: note.title,
         content: note.content,
@@ -592,6 +634,8 @@ class NoteService {
         project: names[0] || note.project || null,
         collection: names[0] || null,
         collections: names,
+        // Encrypted names come empty: the app fills them in by id.
+        collectionIds: linked.map((collection) => collection.id),
         tags: note.tags || [],
         isFavorite: favoriteNoteIds.has(note.id),
       });
@@ -603,6 +647,67 @@ class NoteService {
       skipped,
       notes: exported,
     };
+  }
+
+  /**
+   * The company's items, for its owner: works while the company is suspended, so the
+   * items can always be taken out. End-to-end items come sealed with the owner's ways
+   * in (their browser opens them); the file has the personal backup format.
+   */
+  async exportCompany(companyId: number, userId: number) {
+    const owner = await CompanyMember.findOne({
+      where: { companyId, userId, status: "active", role: "owner" },
+    });
+    if (!owner) {
+      throw Object.assign(new Error("Only the company's owner can export its items"), { status: 403 });
+    }
+    const collections = await Collection.findAll({ where: { companyId }, attributes: ["id", "name", "encName"] });
+    const nameOf = new Map(collections.map((collection) => [collection.id, collectionLabel(collection)]));
+    const noteIds = await CollectionService.noteIdsForCollections(collections.map((collection) => collection.id));
+    const notes = noteIds.length
+      ? await Note.findAll({ where: { id: { [Op.in]: noteIds } }, order: [["updatedAt", "DESC"]] })
+      : [];
+    const collectionsByNoteId = await CollectionService.collectionsByNoteId(notes.map((note) => note.id));
+    const keyPaths = await E2EItemService.keyPathsFor(userId, notes);
+    const exported = [];
+    let skipped = 0;
+
+    for (const note of notes) {
+      const linkedHere = (collectionsByNoteId.get(note.id) || []).filter((collection) => nameOf.has(collection.id));
+      const names = linkedHere.map((collection) => collection.name);
+      if (note.e2e) {
+        exported.push({
+          e2e: true,
+          e2eId: note.e2eId,
+          itemKey: note.userId === userId ? note.itemKey : null,
+          e2eKeys: keyPaths.get(note.id) || { collections: [] },
+          encData: note.encData,
+          category: note.category,
+          collection: names[0] || null,
+          collections: names,
+          // Encrypted names come empty: the app fills them in by id.
+          collectionIds: linkedHere.map((collection) => collection.id),
+        });
+        continue;
+      }
+      if ((note.content as { decryptionFailed?: boolean })?.decryptionFailed) {
+        skipped += 1;
+        continue;
+      }
+      exported.push({
+        title: note.title,
+        content: note.content,
+        category: note.category,
+        project: names[0] || note.project || null,
+        collection: names[0] || null,
+        collections: names,
+        // Encrypted names come empty: the app fills them in by id.
+        collectionIds: linkedHere.map((collection) => collection.id),
+        tags: note.tags || [],
+      });
+    }
+
+    return { version: 1, exportedAt: new Date().toISOString(), skipped, notes: exported };
   }
 
   /**
@@ -701,6 +806,7 @@ class NoteService {
         await CollectionService.assertCanAdd(collectionId, userId);
       }
     }
+    if (data.e2e) return this.createSealed(userId, data, requested || []);
 
     const content = cleanOnCreate(data.content);
     await this.assertPasswordRule(requested || [], content);
@@ -743,6 +849,82 @@ class NoteService {
     );
   }
 
+  /** A new end-to-end item: the server stores what the browser sealed. */
+  private async createSealed(userId: number, data: CreateNoteData, collectionIds: number[]) {
+    const sealed = assertSealed(data.e2e);
+    const version = data.version ? assertEncData(data.version, "version") : null;
+    const itemKeys = await E2EItemService.ensureNew(userId, sealed.e2eId, collectionIds, data.e2eKeys);
+    const note = await Note.create({
+      ...BLANK_FIELDS,
+      ...sealed,
+      e2e: true,
+      category: storedCategory(data.category) || "note",
+      collectionId: null,
+      userId,
+    });
+    if (version) await this.keepSealedVersion(note.id, userId, version);
+    if (collectionIds.length) await CollectionService.setNoteCollections(note.id, collectionIds);
+    await E2EItemService.storeNewItemKeys(note.id, itemKeys);
+    if (data.isFavorite) await this.setUserFavorite(userId, note.id, true);
+    return this.annotateSaved(note, userId);
+  }
+
+  /**
+   * Save an end-to-end item (its owner, or someone it's shared with to edit).
+   * The readable fields (title, content…) are never written: they would leak it.
+   */
+  private async updateSealed(note: Note, userId: number, data: UpdateNoteData, permission: SharePermission | "owner") {
+    if (data.title !== undefined || data.content !== undefined || data.tags !== undefined) {
+      throw Object.assign(new Error("This item is end-to-end encrypted. Reload the page and try again."), {
+        status: 409,
+      });
+    }
+    const encData = data.encData !== undefined ? assertEncData(data.encData) : undefined;
+    const version = data.version ? assertEncData(data.version, "version") : null;
+    // Only the owner moves an item between collections.
+    const requested = permission === "owner" ? this.requestedCollectionIds(data) : null;
+    if (requested) {
+      for (const collectionId of requested) {
+        await CollectionService.assertCanAdd(collectionId, userId);
+      }
+      await E2EItemService.ensure(userId, [note.id], data.e2eKeys, {
+        collectionsByNote: new Map([[note.id, requested]]),
+      });
+    }
+    await note.update({
+      ...(encData ? { encData } : {}),
+      ...(data.category !== undefined ? { category: storedCategory(data.category) } : {}),
+    });
+    if (version) await this.keepSealedVersion(note.id, userId, version);
+    if (requested) await CollectionService.setNoteCollections(note.id, requested);
+    if (data.isFavorite !== undefined && permission === "owner") {
+      await this.setUserFavorite(userId, note.id, Boolean(data.isFavorite));
+    }
+    return this.annotateSaved(note, userId, permission);
+  }
+
+  /** The saved item as the list shows it, with the caller's ways in. */
+  private async annotateSaved(note: Note, userId: number, permission: SharePermission | "owner" = "owner") {
+    const saved = await Note.findByPk(note.id, { include: this.collectionInclude() });
+    const favoriteNoteIds = await this.getFavoriteNoteIds(userId);
+    const collections = await CollectionService.collectionsByNoteId([note.id]);
+    const permissionByNoteId = new Map<number, SharePermission>();
+    if (permission !== "owner") permissionByNoteId.set(note.id, permission);
+    return this.withKeyPaths(
+      this.annotateNote(saved || note, userId, permissionByNoteId, favoriteNoteIds, collections.get(note.id)),
+      await E2EItemService.keyPathsFor(userId, [saved || note])
+    );
+  }
+
+  // History must never stop a save; a failure is logged instead.
+  private async keepSealedVersion(noteId: number, userId: number, encData: string) {
+    try {
+      await VersionService.storeSealed(noteId, encData, userId);
+    } catch (error: any) {
+      console.error("Could not keep a version of item", noteId, error?.message || error);
+    }
+  }
+
   /**
    * Update a note (owner or edit permission)
    */
@@ -756,6 +938,10 @@ class NoteService {
     }
 
     const note = access.note;
+    if (note.e2e) return this.updateSealed(note, userId, data, access.permission);
+    if (data.encData !== undefined) {
+      throw Object.assign(new Error("This item isn't end-to-end encrypted yet."), { status: 409 });
+    }
     // Editing would replace data we could not read with whatever the form held.
     if (data.content !== undefined && isDecryptionFailure(note.content)) {
       throw Object.assign(
@@ -896,7 +1082,12 @@ class NoteService {
    * the restore becomes a version too and the restore can be undone.
    */
   async restoreVersion(noteId: number, versionId: number, userId: number) {
-    if (!(await this.versionAccess(noteId, userId))) return null;
+    const access = await this.versionAccess(noteId, userId);
+    if (!access) return null;
+    // The browser restores these itself: it opens the version and saves it.
+    if (access.note.e2e) {
+      throw Object.assign(new Error("Reload the page to restore this version."), { status: 409 });
+    }
     const version = await VersionService.get(noteId, versionId);
     if (!version) return null;
     if (isDecryptionFailure(version.content)) {
@@ -963,6 +1154,40 @@ class NoteService {
     });
 
     return matches.slice(0, 20);
+  }
+
+  /**
+   * The sealed (end-to-end) logins this person could fill, with their ways in:
+   * the extension opens them and matches the site itself (stage 10.5). The
+   * server can't: it can't read them.
+   */
+  async sealedAutofillItems(userId: number) {
+    const noteIds = await this.autofillNoteIds(userId);
+    const notes = noteIds.length
+      ? await Note.findAll({
+          where: { id: { [Op.in]: noteIds }, e2e: true },
+          attributes: ["id", "userId", "category", "e2e", "e2eId", "itemKey", "encData", "updatedAt"],
+        })
+      : [];
+    const { permissionByNoteId } = await this.getAccessMaps(userId);
+    const keyPaths = await E2EItemService.keyPathsFor(userId, notes);
+    return notes.map((note) => {
+      const isOwner = note.userId === userId;
+      return {
+        id: note.id,
+        title: "",
+        category: note.category,
+        content: {},
+        isOwner,
+        permission: isOwner ? "owner" : permissionByNoteId.get(note.id) || "view",
+        e2e: true,
+        e2eId: note.e2eId,
+        encData: note.encData,
+        itemKey: isOwner ? note.itemKey : null,
+        e2eKeys: keyPaths.get(note.id) || { collections: [] },
+        updatedAt: note.updatedAt,
+      };
+    });
   }
 
   /**
@@ -1272,13 +1497,14 @@ class NoteService {
   async breachStatus(userId: number) {
     const rows = await BreachResult.findAll({
       where: { userId },
-      attributes: ["noteId", "checkedAt"],
+      attributes: ["noteId", "count", "checkedAt"],
     });
     return {
       checkedAt: rows.length
         ? new Date(Math.max(...rows.map((row) => row.checkedAt.getTime())))
         : null,
-      results: rows.map((row) => ({ noteId: row.noteId, checkedAt: row.checkedAt })),
+      // Counts too: for end-to-end items the browser works out health itself.
+      results: rows.map((row) => ({ noteId: row.noteId, count: row.count, checkedAt: row.checkedAt })),
     };
   }
 
@@ -1365,7 +1591,8 @@ class NoteService {
     userId: number,
     noteIds: number[],
     action: "trash" | "move",
-    collectionId?: number | null
+    collectionId?: number | null,
+    e2eKeys?: unknown
   ) {
     const ids = [...new Set(noteIds.map(Number).filter((id) => !isNaN(id)))];
     if (!ids.length) {
@@ -1414,6 +1641,12 @@ class NoteService {
       const access = await CollectionService.assertCanAdd(collectionId, userId);
       nextIds.push(access.collection.id);
     }
+    await E2EItemService.ensure(
+      userId,
+      editable.map((note) => note.id),
+      e2eKeys,
+      { collectionsByNote: new Map(editable.map((note) => [note.id, nextIds])) }
+    );
 
     for (const note of editable) {
       await CollectionService.setNoteCollections(note.id, nextIds);
@@ -1699,6 +1932,10 @@ class NoteService {
       where: { noteId, sharedWithUserId: recipient.id },
     });
 
+    if (!companyId) {
+      await this.assertPlanAllowsShares(ownerId, noteId, share ? 0 : 1, expiresAt, share?.expiresAt);
+    }
+
     if (share) {
       await share.update({ permission, expiresAt });
     } else {
@@ -1717,7 +1954,8 @@ class NoteService {
     const ownerName = owner?.fullName || owner?.username || "Someone";
     await NotificationService.create(
       recipient.id,
-      `${ownerName} shared "${note.title}" with you`,
+      // End-to-end items have no title here: the notice doesn't name them.
+      note.title ? `${ownerName} shared "${note.title}" with you` : `${ownerName} shared an item with you`,
       note.id
     );
     await EmailService.sendNoteShare({
@@ -1740,18 +1978,75 @@ class NoteService {
   /**
    * Share a note with multiple users at once (owner only)
    */
+  /** Plan limits for sharing a personal note: people, and end dates. */
+  private async assertPlanAllowsShares(
+    ownerId: number,
+    noteId: number,
+    adding: number,
+    expiresAt: Date | null,
+    previousExpiry?: Date | null
+  ) {
+    const current = await NoteShare.count({
+      where: {
+        noteId,
+        [Op.or]: [{ expiresAt: null }, { expiresAt: { [Op.gt]: new Date() } }],
+      },
+    });
+    await EntitlementService.assertCanShareWith(ownerId, current, adding);
+    const changedExpiry =
+      !!expiresAt && (!previousExpiry || new Date(previousExpiry).getTime() !== expiresAt.getTime());
+    if (changedExpiry) await EntitlementService.assertCanUseShareExpiry(ownerId);
+  }
+
   async shareNoteWithMany(
     noteId: number,
     ownerId: number,
     identifiers: string[],
     permission: SharePermission = "view",
     expiresAt: Date | null = null,
+    e2eKeys?: unknown,
   ) {
+    // Owner check first: the end-to-end key step below must never run for
+    // someone else's note (it would reveal which notes exist and who has them).
+    const access = await this.getNoteAccess(noteId, ownerId);
+    if (!access || access.permission !== "owner") {
+      throw Object.assign(new Error("Note not found or you are not the owner"), {
+        status: 404,
+      });
+    }
+
     const uniqueIdentifiers = [
       ...new Set(
         identifiers.map((id) => id?.trim()).filter((id): id is string => !!id),
       ),
     ];
+
+    // Plan limits (personal notes): checked once for the whole request.
+    const inCompany = ((await CollectionService.collectionsByNoteId([noteId])).get(noteId) || []).some(
+      (collection) => collection.companyId
+    );
+    if (!inCompany && uniqueIdentifiers.length) {
+      const people = await User.findAll({
+        where: { [Op.or]: [{ email: { [Op.in]: uniqueIdentifiers } }, { username: { [Op.in]: uniqueIdentifiers } }] },
+        attributes: ["id"],
+      });
+      const already = await NoteShare.findAll({
+        where: { noteId, sharedWithUserId: { [Op.in]: people.map((person) => person.id) } },
+        attributes: ["sharedWithUserId"],
+      });
+      await this.assertPlanAllowsShares(ownerId, noteId, people.length - already.length, expiresAt);
+    }
+    // End-to-end items: a key copy for each person, made in the browser.
+    // Before the per-person loop, which reports errors as failed people.
+    const recipients = uniqueIdentifiers.length
+      ? await User.findAll({
+          where: { [Op.or]: [{ email: { [Op.in]: uniqueIdentifiers } }, { username: { [Op.in]: uniqueIdentifiers } }] },
+          attributes: ["id"],
+        })
+      : [];
+    await E2EItemService.ensure(ownerId, [noteId], e2eKeys, {
+      extraShares: new Map([[noteId, recipients.map((user) => user.id)]]),
+    });
 
     if (!uniqueIdentifiers.length) {
       throw Object.assign(
@@ -1828,6 +2123,7 @@ class NoteService {
     const deleted = await NoteShare.destroy({
       where: { noteId, sharedWithUserId },
     });
+    await E2EItemService.dropItemKey(noteId, "user", sharedWithUserId);
 
     if (!deleted) {
       throw Object.assign(new Error("Share not found"), { status: 404 });
@@ -1863,6 +2159,7 @@ class NoteService {
     const removed = await NoteShare.destroy({
       where: { noteId, sharedWithUserId: userId },
     });
+    await E2EItemService.dropItemKey(noteId, "user", userId);
 
     const viaCollections = linked.length
       ? await CollectionShare.findAll({

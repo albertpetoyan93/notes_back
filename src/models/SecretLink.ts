@@ -9,8 +9,12 @@ interface SecretLinkAttributes {
   iv: string;
   /** Set when a passphrase is needed. */
   salt: string | null;
-  /** "iv.ciphertext" of a known text under the final key: checks a passphrase. */
+  /** Links made before proofHash: "iv.ciphertext" of a known text, checked by the page. */
   check: string | null;
+  /** SHA-256 (hex) of the passphrase proof the browser sends to open the link. */
+  proofHash: string | null;
+  /** Wrong passphrases so far; MAX_ATTEMPTS destroy the link. */
+  failedAttempts: number;
   /** The creator's own name for the link, encrypted with the server key. */
   label: string | null;
   maxViews: number;
@@ -25,7 +29,7 @@ interface SecretLinkAttributes {
 
 type SecretLinkCreation = Optional<
   SecretLinkAttributes,
-  "salt" | "check" | "label" | "maxViews" | "viewCount" | "revokedAt" | "openedAt" | "noteId" | "createdAt"
+  "salt" | "check" | "proofHash" | "failedAttempts" | "label" | "maxViews" | "viewCount" | "revokedAt" | "openedAt" | "noteId" | "createdAt"
 >;
 
 class SecretLink
@@ -37,6 +41,8 @@ class SecretLink
   public iv!: string;
   public salt!: string | null;
   public check!: string | null;
+  public proofHash!: string | null;
+  public failedAttempts!: number;
   public label!: string | null;
   public maxViews!: number;
   public viewCount!: number;
@@ -55,6 +61,8 @@ SecretLink.init(
     iv: { type: DataTypes.STRING(32), allowNull: false },
     salt: { type: DataTypes.STRING(64), allowNull: true },
     check: { type: DataTypes.TEXT, allowNull: true },
+    proofHash: { type: DataTypes.STRING(64), allowNull: true },
+    failedAttempts: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },
     label: { type: DataTypes.TEXT, allowNull: true },
     maxViews: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 1 },
     viewCount: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },

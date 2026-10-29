@@ -4,8 +4,10 @@ import Company, { type CompanyPolicies } from "../models/Company";
 import CompanyMember, { CompanyRole } from "../models/CompanyMember";
 import User from "../models/User";
 import { formatCompanyName } from "../util/formatCompanyName";
+import CompanyBilling from "./CompanyBilling";
 import CompanyPolicyService from "./CompanyPolicyService";
 import EmailService from "./EmailService";
+import StripeService from "./StripeService";
 
 const INVITE_MS = 14 * 24 * 60 * 60 * 1000;
 
@@ -20,6 +22,8 @@ export interface CompanySummary {
   policies: CompanyPolicies;
   /** Set when the company's rules keep its items closed to this person. */
   blocked: "2fa" | null;
+  /** A new company's Team trial end. */
+  trialEndsAt?: string | null;
 }
 
 class CompanyService {
@@ -114,6 +118,8 @@ class CompanyService {
         { transaction }
       );
       await transaction.commit();
+      // Every company starts on a free 14-day Team trial.
+      const trial = await CompanyBilling.startTrial(company.id);
       return {
         id: company.id,
         name: company.name,
@@ -123,6 +129,7 @@ class CompanyService {
         expiresAt: null,
         policies: CompanyPolicyService.clean({}),
         blocked: null,
+        trialEndsAt: trial?.trialEndsAt ? new Date(trial.trialEndsAt).toISOString() : null,
       };
     } catch (error) {
       await transaction.rollback();
@@ -283,6 +290,8 @@ class CompanyService {
       throw Object.assign(new Error("Only the owner can remove an admin"), { status: 403 });
     }
     await member.destroy();
+    // A removed member's seat stops being billed at the next renewal.
+    if (member.status === "active") StripeService.syncSeatsLater(companyId);
     return { ok: true };
   }
 
@@ -291,6 +300,8 @@ class CompanyService {
     await this.claimInvites(userId, user.email);
     const member = await this.openInvite(companyId, userId);
     await member.update({ status: "active", expiresAt: null });
+    // Accepted members are billed (pro rata); invited people never are.
+    StripeService.syncSeatsLater(companyId);
     // The company's rules (e.g. require 2FA) apply from the first request.
     CompanyPolicyService.clear(userId);
     return this.summary(member);

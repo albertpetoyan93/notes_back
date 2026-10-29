@@ -13,12 +13,14 @@ interface NoteVersionAttributes {
   /** What changed in this save: field names, "Title", "Notes"… never values. */
   changes: string[];
   changedBy: number | null;
+  /** Encrypted in the browser: content is the whole state, sealed with the item key. */
+  e2e?: boolean;
   createdAt: Date;
 }
 
 type NoteVersionCreation = Optional<
   NoteVersionAttributes,
-  "id" | "tags" | "changes" | "changedBy" | "createdAt"
+  "id" | "tags" | "changes" | "changedBy" | "e2e" | "createdAt"
 >;
 
 class NoteVersion
@@ -33,6 +35,7 @@ class NoteVersion
   public content!: string;
   public changes!: string[];
   public changedBy!: number | null;
+  public e2e!: boolean;
   public createdAt!: Date;
 }
 
@@ -46,6 +49,7 @@ NoteVersion.init(
     content: { type: DataTypes.TEXT, allowNull: false },
     changes: { type: DataTypes.JSONB, allowNull: false, defaultValue: [] },
     changedBy: { type: DataTypes.INTEGER, allowNull: true },
+    e2e: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
     createdAt: { type: DataTypes.DATE, allowNull: false, defaultValue: DataTypes.NOW },
   },
   {

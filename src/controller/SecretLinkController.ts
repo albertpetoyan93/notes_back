@@ -77,7 +77,7 @@ export default class SecretLinkController {
   static open = async (req: Request, res: Response, next: NextFunction) => {
     try {
       res.set("Cache-Control", "no-store");
-      const opened = await SecretLinkService.open(String(req.params.id));
+      const opened = await SecretLinkService.open(String(req.params.id), req.body?.proof);
       // In the creator's account activity, with the opener's IP and browser.
       await AuditService.record({
         actorId: opened.creator,

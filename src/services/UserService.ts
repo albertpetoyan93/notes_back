@@ -15,6 +15,10 @@ class UserService {
         "fullName",
         "twoFactorEnabled",
         "autoLockMinutes",
+        "e2eEnabled",
+        "mustChangeMasterPassword",
+        "e2eSince",
+        "publicKey",
         "createdAt",
       ],
     });

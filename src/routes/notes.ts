@@ -24,6 +24,11 @@ router.post("/passkeys", NoteController.savePasskey as RequestHandler);
 router.get("/health/breaches", NoteController.breachStatus as RequestHandler);
 router.post("/health/breaches", NoteController.saveBreachResults as RequestHandler);
 router.get("/export", NoteController.exportNotes as RequestHandler);
+// End-to-end items (stage 10.3): encrypt existing ones, or unseal to share.
+router.get("/e2e/pending", NoteController.e2ePending as RequestHandler);
+router.get("/e2e/autofill", NoteController.e2eAutofill as RequestHandler);
+router.post("/e2e/migrate", NoteController.e2eMigrate as RequestHandler);
+router.post("/e2e/unseal", NoteController.e2eUnseal as RequestHandler);
 router.post("/import", NoteController.importNotes as RequestHandler);
 router.delete("/trash", NoteController.emptyTrash as RequestHandler);
 router.post("/bulk", NoteController.bulkUpdate as RequestHandler);

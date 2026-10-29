@@ -18,6 +18,18 @@ interface UserAttributes {
   twoFactorLastStep?: number | null;
   /** Lock the vault after this many idle minutes; 0 = never. */
   autoLockMinutes?: number;
+  // End-to-end encryption (E2E_DESIGN.md). All key values are locked (wrapped).
+  e2eEnabled?: boolean;
+  e2eSince?: Date | null;
+  /** A company admin set a temporary master password: the person chooses their own at next sign-in. */
+  mustChangeMasterPassword?: boolean;
+  kdfSalt?: string | null;
+  kdfParams?: { algorithm: "argon2id"; memory: number; iterations: number; parallelism: number } | null;
+  protectedUserKey?: string | null;
+  publicKey?: string | null;
+  protectedPrivateKey?: string | null;
+  recoveryProtectedUserKey?: string | null;
+  recoveryAuthHash?: string | null;
   createdAt?: Date;
   updatedAt?: Date;
 }
@@ -36,6 +48,16 @@ interface UserCreationAttributes
     | "twoFactorRecoveryCodes"
     | "twoFactorLastStep"
     | "autoLockMinutes"
+    | "e2eEnabled"
+    | "e2eSince"
+    | "mustChangeMasterPassword"
+    | "kdfSalt"
+    | "kdfParams"
+    | "protectedUserKey"
+    | "publicKey"
+    | "protectedPrivateKey"
+    | "recoveryProtectedUserKey"
+    | "recoveryAuthHash"
     | "createdAt"
     | "updatedAt"
   > {}
@@ -58,6 +80,16 @@ class User
   public twoFactorRecoveryCodes?: string[] | null;
   public twoFactorLastStep?: number | null;
   public autoLockMinutes!: number;
+  public e2eEnabled!: boolean;
+  public e2eSince?: Date | null;
+  public mustChangeMasterPassword!: boolean;
+  public kdfSalt?: string | null;
+  public kdfParams?: UserAttributes["kdfParams"];
+  public protectedUserKey?: string | null;
+  public publicKey?: string | null;
+  public protectedPrivateKey?: string | null;
+  public recoveryProtectedUserKey?: string | null;
+  public recoveryAuthHash?: string | null;
   public readonly createdAt!: Date;
   public readonly updatedAt!: Date;
 
@@ -121,6 +153,16 @@ User.init(
       allowNull: false,
       defaultValue: 15,
     },
+    e2eEnabled: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+    e2eSince: { type: DataTypes.DATE, allowNull: true },
+    mustChangeMasterPassword: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+    kdfSalt: { type: DataTypes.STRING(64), allowNull: true },
+    kdfParams: { type: DataTypes.JSONB, allowNull: true },
+    protectedUserKey: { type: DataTypes.TEXT, allowNull: true },
+    publicKey: { type: DataTypes.STRING(64), allowNull: true },
+    protectedPrivateKey: { type: DataTypes.TEXT, allowNull: true },
+    recoveryProtectedUserKey: { type: DataTypes.TEXT, allowNull: true },
+    recoveryAuthHash: { type: DataTypes.STRING(100), allowNull: true },
     twoFactorSecret: {
       type: DataTypes.TEXT,
       allowNull: true,

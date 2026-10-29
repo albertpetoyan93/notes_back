@@ -1,5 +1,6 @@
 import AuthController from "@src/controller/AuthController";
 import LockController from "@src/controller/LockController";
+import E2EController from "@src/controller/E2EController";
 import PasskeyController from "@src/controller/PasskeyController";
 import isAuth from "@src/middlwares/isAuth";
 import rateLimit from "express-rate-limit";
@@ -19,6 +20,17 @@ const twoFactorLimiter = rateLimit({
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: "Too many attempts. Try again in 15 minutes." },
+});
+
+// Prelogin and passkey options only fetch what a sign-in needs (the login page
+// asks on every visit), so they get their own budget instead of using up
+// sign-in attempts.
+const lookupLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 60,
   standardHeaders: true,
   legacyHeaders: false,
   message: { message: "Too many attempts. Try again in 15 minutes." },
@@ -65,7 +77,7 @@ router.post(
   AuthController.twoFactorRecoveryCodes as any
 );
 // Passkeys: sign in without a password, and manage the ones on the account.
-router.post("/passkeys/login/options", authLimiter, PasskeyController.loginOptions);
+router.post("/passkeys/login/options", lookupLimiter, PasskeyController.loginOptions);
 router.post("/passkeys/login/verify", authLimiter, PasskeyController.login);
 router.get("/passkeys", isAuth, PasskeyController.list as any);
 // Asks for the password, so it shares the tighter limit.
@@ -76,8 +88,19 @@ router.post(
   PasskeyController.registrationOptions as any
 );
 router.post("/passkeys/register/verify", isAuth, PasskeyController.register as any);
+// Must come before "/passkeys/:id": end-to-end accounts let a passkey open the vault.
+router.post("/passkeys/unlock-key", twoFactorLimiter, isAuth, PasskeyController.saveUnlockKey as any);
 router.patch("/passkeys/:id", isAuth, PasskeyController.rename as any);
 router.delete("/passkeys/:id", isAuth, PasskeyController.remove as any);
+// End-to-end encryption (master password). Public steps are rate limited.
+router.post("/prelogin", lookupLimiter, E2EController.prelogin);
+router.post("/e2e/recover", twoFactorLimiter, E2EController.recoveryStart);
+router.post("/e2e/recover/complete", twoFactorLimiter, E2EController.recoveryComplete);
+router.get("/e2e/keys", isAuth, E2EController.keys as any);
+router.post("/e2e/enable", authLimiter, isAuth, E2EController.enable as any);
+router.post("/e2e/master-password", authLimiter, isAuth, E2EController.changeMasterPassword as any);
+router.post("/e2e/recovery-key", authLimiter, isAuth, E2EController.replaceRecoveryKey as any);
+
 // Auto-lock. Unlocking is rate limited like the 2FA step.
 router.post("/session/active", isAuth, LockController.active as any);
 router.post("/lock", isAuth, LockController.lock as any);

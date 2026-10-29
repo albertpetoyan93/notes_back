@@ -4,6 +4,7 @@ import User from "../models/User";
 import AuditService from "../services/AuditService";
 import PasskeyService, { PasskeyError } from "../services/PasskeyService";
 import SessionService, { AUTO_LOCK_CHOICES } from "../services/SessionService";
+import E2EAccountService from "../services/E2EAccountService";
 
 type LockRequest = Request & {
   user?: { id: number; sessionId?: number; locked?: boolean };
@@ -42,10 +43,13 @@ export default class LockController {
         res.status(HttpStatusCodes.UNAUTHORIZED).send({ message: "Sign in again" });
         return;
       }
-      const password = String(req.body?.password || "");
-      if (!password || !(await user.comparePassword(password))) {
+      // Master-password accounts prove it with the derived sign-in key.
+      const secret = String((user.e2eEnabled ? req.body?.authKey : req.body?.password) || "");
+      if (!secret || !(await user.comparePassword(secret))) {
         await AuditService.record({ actorId: user.id, action: "unlock_failed", req });
-        res.status(HttpStatusCodes.UNAUTHORIZED).send({ message: "That password isn't right." });
+        res.status(HttpStatusCodes.UNAUTHORIZED).send({
+          message: user.e2eEnabled ? "That master password isn't right." : "That password isn't right.",
+        });
         return;
       }
       await SessionService.unlock(sessionId, user.id);
@@ -55,7 +59,8 @@ export default class LockController {
         details: { method: "password" },
         req,
       });
-      res.status(HttpStatusCodes.OK).send({ locked: false });
+      // The locked keys, so the browser can open the vault again.
+      res.status(HttpStatusCodes.OK).send({ locked: false, keys: E2EAccountService.bundle(user) });
     } catch (e) {
       next(e);
     }
@@ -87,6 +92,15 @@ export default class LockController {
           .send({ message: "That passkey belongs to another account." });
         return;
       }
+      // End-to-end accounts: a passkey that can't open the vault doesn't
+      // unlock the session either, so the server and the browser agree.
+      if (user.e2eEnabled && !passkey.prfUserKey) {
+        res.status(HttpStatusCodes.BAD_REQUEST).send({
+          message:
+            "This passkey can't open your vault yet. Use your master password, then turn on unlock for it in Security settings.",
+        });
+        return;
+      }
       await SessionService.unlock(sessionId, id);
       await AuditService.record({
         actorId: id,
@@ -94,7 +108,12 @@ export default class LockController {
         details: { method: "passkey", passkeyName: passkey.name },
         req,
       });
-      res.status(HttpStatusCodes.OK).send({ locked: false });
+      res.status(HttpStatusCodes.OK).send({
+        locked: false,
+        ...(user.e2eEnabled
+          ? { keys: E2EAccountService.bundle(user), passkeyUserKey: passkey.prfUserKey || null }
+          : {}),
+      });
     } catch (e) {
       if (e instanceof PasskeyError) {
         res.status(HttpStatusCodes.UNAUTHORIZED).send({ message: e.message });

@@ -1,6 +1,8 @@
 import User from "../models/User";
+import UserPasskey from "../models/UserPasskey";
 import CompanyService from "./CompanyService";
 import EmailService from "./EmailService";
+import FamilyService from "./FamilyService";
 import logger from "jet-logger";
 import { Op } from "sequelize";
 import jwt from "jsonwebtoken";
@@ -8,6 +10,7 @@ import crypto from "crypto";
 import EnvVars from "../common/EnvVars";
 import { SessionKind } from "../models/UserSession";
 import SessionService, { SessionMeta } from "./SessionService";
+import E2EAccountService from "./E2EAccountService";
 
 const RESET_MESSAGE =
   "If an account exists for that email, we sent a reset link.";
@@ -15,14 +18,25 @@ const RESET_MESSAGE =
 interface RegisterData {
   username: string;
   email: string;
+  /** For end-to-end accounts, the sign-in key (as in e2e.password). */
   password: string;
   fullName?: string;
+  /** End-to-end keys made in the browser (E2EAccountService.checkedBundle). */
+  e2e?: Record<string, unknown>;
 }
 
 interface LoginData {
   email: string;
-  password: string;
+  /** Accounts without end-to-end encryption. */
+  password?: string;
+  /** Accounts with it: the sign-in key the browser derived from the master password. */
+  authKey?: string;
 }
+
+/** Thrown when an old app sends a typed password for a master-password account. */
+export const E2E_REQUIRED = "E2E_REQUIRED";
+export const MASTER_RESET_REFUSED =
+  "This account uses a master password, which can't be reset by email. Use your recovery key instead.";
 
 class AuthService {
   /**
@@ -46,9 +60,11 @@ class AuthService {
       email: data.email,
       password: data.password,
       fullName: data.fullName,
+      ...(data.e2e ? { ...data.e2e, e2eEnabled: true, e2eSince: new Date() } : {}),
     });
 
     await CompanyService.claimInvites(user.id, user.email);
+    await FamilyService.claimInvites(user.id, user.email);
 
     return user;
   }
@@ -64,8 +80,16 @@ class AuthService {
       throw new Error("Invalid credentials");
     }
 
-    // Check password
-    const isPasswordValid = await user.comparePassword(data.password);
+    // Master-password accounts only accept the derived sign-in key. A typed
+    // password can never match it, so an old app gets a clear message instead.
+    if (user.e2eEnabled) {
+      if (!data.authKey) throw new Error(E2E_REQUIRED);
+      if (!/^[A-Za-z0-9_-]{43}$/.test(String(data.authKey))) throw new Error("Invalid credentials");
+      if (!(await user.comparePassword(String(data.authKey)))) throw new Error("Invalid credentials");
+      return user;
+    }
+
+    const isPasswordValid = await user.comparePassword(String(data.password ?? ""));
 
     if (!isPasswordValid) {
       throw new Error("Invalid credentials");
@@ -137,6 +161,18 @@ class AuthService {
     });
     if (!user) return RESET_MESSAGE;
 
+    // A master password can't be reset by email: the server can't open the
+    // vault, and the old keys would be lost. The email says what does work.
+    if (user.e2eEnabled) {
+      try {
+        if (EmailService.isConfigured()) await EmailService.sendMasterPasswordHelp({ to: user.email });
+        else logger.info(`Password reset asked for ${user.email}, an end-to-end account: no link sent.`);
+      } catch (error) {
+        logger.err(error, true);
+      }
+      return RESET_MESSAGE;
+    }
+
     const token = crypto.randomBytes(32).toString("hex");
     const passwordResetTokenHash = crypto
       .createHash("sha256")
@@ -191,12 +227,20 @@ class AuthService {
     ) {
       throw new Error("This reset link is invalid or has expired.");
     }
+    // A link sent before end-to-end encryption was turned on: resetting now
+    // would lose the vault's keys (see requestPasswordReset).
+    if (user.e2eEnabled) {
+      await user.update({ passwordResetTokenHash: null, passwordResetExpires: null });
+      throw new Error(MASTER_RESET_REFUSED);
+    }
 
     await user.update({
       password,
       passwordResetTokenHash: null,
       passwordResetExpires: null,
     });
+    // Passkey unlock copies of the old user key go with it.
+    await UserPasskey.update({ prfUserKey: null }, { where: { userId: user.id } });
     await SessionService.revokeAll(user.id);
     return user.id;
   }

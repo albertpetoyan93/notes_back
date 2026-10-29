@@ -1,4 +1,5 @@
 import { Response } from "express";
+import NoteService from "../services/NoteService";
 import CompanyService from "../services/CompanyService";
 import AuditService from "../services/AuditService";
 import CompanyMember from "../models/CompanyMember";
@@ -110,6 +111,29 @@ export default class CompanyController {
     } catch (error: any) {
       res.status(error.status || 500).json({
         message: error.status ? error.message : "Error updating member",
+      });
+    }
+  };
+
+  /** The owner's export of every company item (also while the company is suspended). */
+  static exportItems = async (req: any, res: Response) => {
+    try {
+      const userId = req.user?.id;
+      const companyId = parseInt(req.params.id);
+      if (!userId) return res.status(401).json({ message: "Unauthorized" });
+      if (isNaN(companyId)) return res.status(400).json({ message: "Invalid company" });
+      const backup = await NoteService.exportCompany(companyId, userId);
+      await AuditService.record({
+        actorId: userId,
+        action: "company_exported",
+        companyId,
+        details: { count: backup.notes.length },
+        req,
+      });
+      res.json(backup);
+    } catch (error: any) {
+      res.status(error.status || 500).json({
+        message: error.status ? error.message : "Error exporting the company's items",
       });
     }
   };

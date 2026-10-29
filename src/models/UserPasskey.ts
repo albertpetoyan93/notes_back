@@ -15,13 +15,15 @@ interface UserPasskeyAttributes {
   backedUp: boolean;
   name: string;
   lastUsedAt?: Date | null;
+  /** End-to-end accounts: the user key, wrapped with a key from this passkey's PRF secret. */
+  prfUserKey?: string | null;
   createdAt?: Date;
   updatedAt?: Date;
 }
 
 type UserPasskeyCreation = Optional<
   UserPasskeyAttributes,
-  "id" | "counter" | "transports" | "deviceType" | "backedUp" | "lastUsedAt" | "createdAt" | "updatedAt"
+  "id" | "counter" | "transports" | "deviceType" | "backedUp" | "lastUsedAt" | "prfUserKey" | "createdAt" | "updatedAt"
 >;
 
 class UserPasskey
@@ -38,6 +40,7 @@ class UserPasskey
   public backedUp!: boolean;
   public name!: string;
   public lastUsedAt?: Date | null;
+  public prfUserKey?: string | null;
   public readonly createdAt!: Date;
   public readonly updatedAt!: Date;
 }
@@ -91,6 +94,10 @@ UserPasskey.init(
     },
     lastUsedAt: {
       type: DataTypes.DATE,
+      allowNull: true,
+    },
+    prfUserKey: {
+      type: DataTypes.TEXT,
       allowNull: true,
     },
   },

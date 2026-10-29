@@ -6,6 +6,8 @@ import app from "./server";
 import socketService from "./services/SocketManager";
 import initializeDatabase from "./configs/DB/init";
 import { assertEncryptionReady } from "./util/encryption";
+import JobService from "./services/JobService";
+import { registerBillingJobs } from "./services/BillingJobs";
 
 // **** Run **** //
 
@@ -31,6 +33,10 @@ async function start() {
     });
 
     logger.info("Enhanced DB polling system started");
+
+    // Daily jobs (trial reminders and expiry), once a day, never twice.
+    registerBillingJobs();
+    JobService.start();
 
     // Setup graceful shutdown
     setupGracefulShutdown();

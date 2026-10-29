@@ -7,6 +7,7 @@ import Note from "../models/Note";
 import NoteShare from "../models/NoteShare";
 import User from "../models/User";
 import CollectionService from "./CollectionService";
+import { collectionLabel } from "./E2EItemService";
 
 /** One way a person reaches an item. */
 export type AccessRoute =
@@ -70,7 +71,7 @@ class AccessService {
     const collections = collectionIds.length
       ? await Collection.findAll({
           where: { id: { [Op.in]: collectionIds } },
-          attributes: ["id", "name", "userId", "companyId", "companyShare"],
+          attributes: ["id", "name", "encName", "userId", "companyId", "companyShare"],
         })
       : [];
     const collectionById = new Map(collections.map((item) => [item.id, item]));
@@ -169,7 +170,7 @@ class AccessService {
             add(member.userId, {
               type: "company",
               collectionId: collection.id,
-              collectionName: collection.name,
+              collectionName: collectionLabel(collection),
               permission,
               role,
               everyone: role === "member" && !share && !!collection.companyShare,
@@ -206,7 +207,7 @@ class AccessService {
             add(share.sharedWithUserId, {
               type: "collection",
               collectionId: collection.id,
-              collectionName: collection.name,
+              collectionName: collectionLabel(collection),
               permission: share.permission,
               expiresAt: share.expiresAt ?? null,
             });
@@ -216,7 +217,7 @@ class AccessService {
             add(collection.userId, {
               type: "collection",
               collectionId: collection.id,
-              collectionName: collection.name,
+              collectionName: collectionLabel(collection),
               permission: "edit",
               expiresAt: null,
               collectionOwner: true,

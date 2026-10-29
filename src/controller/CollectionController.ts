@@ -1,8 +1,10 @@
 import { Response } from "express";
 import CollectionService from "../services/CollectionService";
 import AuditService from "../services/AuditService";
+import E2EItemService, { e2eConflictBody, isE2EAnswer } from "../services/E2EItemService";
 import NotificationService from "../services/NotificationService";
 import User from "../models/User";
+import { PlanLimitError, planLimitBody } from "../services/EntitlementService";
 
 const parseExpiry = (expiresIn: unknown) => {
   if (!expiresIn || expiresIn === "never") return null;
@@ -12,6 +14,52 @@ const parseExpiry = (expiresIn: unknown) => {
 };
 
 export default class CollectionController {
+  /** End-to-end background work for the collections this person manages. */
+  static e2eTasks = async (req: any, res: Response) => {
+    try {
+      res.json(await E2EItemService.tasks(req.user?.id));
+    } catch (error) {
+      console.error("Error listing key tasks:", error);
+      res.status(500).json({ message: "Error listing key tasks" });
+    }
+  };
+
+  /** Collection keys made in the browser: a new key, or copies for people who just got access. */
+  static e2eKeys = async (req: any, res: Response) => {
+    try {
+      await E2EItemService.applyKeys(req.user?.id, { collections: req.body?.collections });
+      res.json({ ok: true });
+    } catch (error: any) {
+      if (error?.status >= 400 && error?.status < 500) return res.status(error.status).json({ message: error.message });
+      console.error("Error storing collection keys:", error);
+      res.status(500).json({ message: "Error storing collection keys" });
+    }
+  };
+
+  /** Collection names encrypted (or made readable) in an owner's or admin's browser. */
+  static e2eNames = async (req: any, res: Response) => {
+    try {
+      res.json(await E2EItemService.applyNames(req.user?.id, req.body?.items));
+    } catch (error: any) {
+      if (error?.status >= 400 && error?.status < 500) return res.status(error.status).json({ message: error.message });
+      console.error("Error storing collection names:", error);
+      res.status(500).json({ message: "Error storing collection names" });
+    }
+  };
+
+  /** A new collection key after someone lost access. */
+  static e2eRotate = async (req: any, res: Response) => {
+    try {
+      const id = parseInt(req.params.id);
+      if (isNaN(id)) return res.status(400).json({ message: "Invalid collection ID" });
+      res.json(await E2EItemService.rotate(req.user?.id, id, req.body));
+    } catch (error: any) {
+      if (error?.status >= 400 && error?.status < 500) return res.status(error.status).json({ message: error.message });
+      console.error("Error replacing a collection key:", error);
+      res.status(500).json({ message: "Error replacing the collection key" });
+    }
+  };
+
   static list = async (req: any, res: Response) => {
     try {
       const userId = req.user?.id;
@@ -27,9 +75,10 @@ export default class CollectionController {
     try {
       const userId = req.user?.id;
       if (!userId) return res.status(401).json({ message: "Unauthorized" });
-      const collection = await CollectionService.create(userId, req.body?.name || "");
+      const collection = await CollectionService.create(userId, req.body?.name || "", req.body);
       res.status(201).json(collection);
     } catch (error: any) {
+      if (error instanceof PlanLimitError) return res.status(402).json(planLimitBody(error));
       console.error("Error creating collection:", error);
       res.status(error.status || 500).json({
         message: error.status ? error.message : "Error creating collection",
@@ -43,7 +92,7 @@ export default class CollectionController {
       const id = parseInt(req.params.id);
       if (!userId) return res.status(401).json({ message: "Unauthorized" });
       if (isNaN(id)) return res.status(400).json({ message: "Invalid collection ID" });
-      const collection = await CollectionService.rename(id, userId, req.body?.name || "");
+      const collection = await CollectionService.rename(id, userId, req.body?.name || "", req.body);
       if (!collection) return res.status(404).json({ message: "Collection not found" });
       res.json(collection);
     } catch (error: any) {
@@ -76,9 +125,10 @@ export default class CollectionController {
       if (!userId) return res.status(401).json({ message: "Unauthorized" });
       if (isNaN(id)) return res.status(400).json({ message: "Invalid collection ID" });
       const noteIds = Array.isArray(req.body?.noteIds) ? req.body.noteIds : [];
-      const result = await CollectionService.addNotes(id, userId, noteIds);
+      const result = await CollectionService.addNotes(id, userId, noteIds, req.body?.e2eKeys);
       res.json(result);
     } catch (error: any) {
+      if (isE2EAnswer(error)) return res.status(409).json(e2eConflictBody(error));
       console.error("Error adding notes to collection:", error);
       res.status(error.status || 500).json({
         message: error.status ? error.message : "Error adding notes",
@@ -159,7 +209,8 @@ export default class CollectionController {
         userId,
         list,
         permission || "view",
-        expiresAt
+        expiresAt,
+        req.body?.e2eKeys
       );
       for (const share of result.shared) {
         if (!share) continue;
@@ -181,6 +232,8 @@ export default class CollectionController {
       }
       res.status(201).json(result);
     } catch (error: any) {
+      if (isE2EAnswer(error)) return res.status(409).json(e2eConflictBody(error));
+      if (error instanceof PlanLimitError) return res.status(402).json(planLimitBody(error));
       console.error("Error sharing collection:", error);
       res.status(error.status || 500).json({ message: "Error sharing collection" });
     }

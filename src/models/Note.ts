@@ -24,6 +24,11 @@ interface NoteAttributes {
   project?: string | null;
   tags?: string[];
   isEncrypted: boolean;
+  /** Encrypted in the browser (E2E_DESIGN.md, stage 10.3): see encData. */
+  e2e?: boolean;
+  e2eId?: string | null;
+  itemKey?: string | null;
+  encData?: string | null;
   userId: number;
   collectionId?: number | null;
   deletedAt?: Date | null;
@@ -39,6 +44,10 @@ interface NoteCreationAttributes
     | "project"
     | "tags"
     | "isEncrypted"
+    | "e2e"
+    | "e2eId"
+    | "itemKey"
+    | "encData"
     | "collectionId"
     | "deletedAt"
     | "createdAt"
@@ -66,6 +75,10 @@ class Note
   public project?: string | null;
   public tags?: string[];
   public isEncrypted!: boolean;
+  public e2e!: boolean;
+  public e2eId?: string | null;
+  public itemKey?: string | null;
+  public encData?: string | null;
   public userId!: number;
   public collectionId?: number | null;
   public deletedAt?: Date | null;
@@ -124,6 +137,10 @@ Note.init(
       allowNull: false,
       defaultValue: false,
     },
+    e2e: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+    e2eId: { type: DataTypes.STRING(32), allowNull: true },
+    itemKey: { type: DataTypes.TEXT, allowNull: true },
+    encData: { type: DataTypes.TEXT, allowNull: true },
     userId: {
       type: DataTypes.INTEGER,
       allowNull: false,

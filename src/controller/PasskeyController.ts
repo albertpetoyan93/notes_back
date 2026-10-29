@@ -5,6 +5,7 @@ import User from "@src/models/User";
 import AuthService from "@src/services/AuthService";
 import AuditService from "@src/services/AuditService";
 import PasskeyService, { PasskeyError } from "@src/services/PasskeyService";
+import E2EAccountService from "@src/services/E2EAccountService";
 import { setAuthCookies } from "@src/util/authCookies";
 import { publicUser, sessionMeta } from "./AuthController";
 
@@ -104,6 +105,36 @@ export default class PasskeyController {
     }
   };
 
+  /** Let one of your passkeys open the vault (end-to-end accounts, PRF). */
+  static saveUnlockKey = async (req: AuthRequest, res: Response, next: NextFunction) => {
+    try {
+      const userId = req.user?.id;
+      if (!userId) {
+        res.status(HttpStatusCodes.UNAUTHORIZED).send({ message: "Unauthorized" });
+        return;
+      }
+      const passkey = await PasskeyService.saveUnlockKey(
+        userId,
+        req.body?.challengeToken,
+        req.body?.response,
+        req.body?.prfUserKey
+      );
+      await AuditService.record({
+        actorId: userId,
+        action: "passkey_unlock_enabled",
+        details: { passkeyName: passkey.name },
+        req: req as unknown as Request,
+      });
+      res.status(HttpStatusCodes.OK).send(passkey);
+    } catch (e) {
+      if (e instanceof PasskeyError) {
+        res.status(HttpStatusCodes.BAD_REQUEST).send({ message: e.message });
+      } else {
+        next(e);
+      }
+    }
+  };
+
   static loginOptions = async (_req: Request, res: Response, next: NextFunction) => {
     try {
       res.status(HttpStatusCodes.OK).send(await PasskeyService.authenticationOptions());
@@ -130,7 +161,14 @@ export default class PasskeyController {
         details: { kind: "web", passkey: true, passkeyName: passkey.name },
         req,
       });
-      res.status(HttpStatusCodes.OK).send({ user: publicUser(user) });
+      // End-to-end accounts: the locked keys, and this passkey's unlock copy
+      // if it has one, so the browser can open the vault without the master password.
+      res.status(HttpStatusCodes.OK).send({
+        user: publicUser(user),
+        ...(user.e2eEnabled
+          ? { keys: E2EAccountService.bundle(user), passkeyUserKey: passkey.prfUserKey || null }
+          : {}),
+      });
     } catch (e) {
       if (e instanceof PasskeyError) {
         res.status(HttpStatusCodes.UNAUTHORIZED).send({ message: e.message });

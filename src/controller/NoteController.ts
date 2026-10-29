@@ -4,6 +4,14 @@ import AuditService from "../services/AuditService";
 import NotificationService from "../services/NotificationService";
 import User from "../models/User";
 import UserSession from "../models/UserSession";
+import { PlanLimitError, planLimitBody } from "../services/EntitlementService";
+import E2EItemService, { e2eConflictBody, isE2EAnswer } from "../services/E2EItemService";
+
+// Only accounts that turned on end-to-end encryption may store sealed items.
+async function e2eAccount(userId: number) {
+  const user = await User.findByPk(userId, { attributes: ["id", "e2eEnabled"] });
+  return !!user?.e2eEnabled;
+}
 
 // Private keys go only to the browser extension's own session, not to the vault's.
 async function fromExtension(req: any) {
@@ -14,6 +22,60 @@ async function fromExtension(req: any) {
 }
 
 export default class NoteController {
+  /** Personal items not yet encrypted in the browser, readable, for it to encrypt. */
+  static e2ePending = async (req: any, res: Response) => {
+    try {
+      const userId = req.user?.id;
+      if (!(await e2eAccount(userId))) return res.status(403).json({ message: "End-to-end encryption is off." });
+      res.json(await E2EItemService.pending(userId));
+    } catch (error) {
+      console.error("Error listing items to encrypt:", error);
+      res.status(500).json({ message: "Error listing items to encrypt" });
+    }
+  };
+
+  /** Store items the browser encrypted, and delete their readable copies. */
+  static e2eMigrate = async (req: any, res: Response) => {
+    try {
+      const userId = req.user?.id;
+      if (!(await e2eAccount(userId))) return res.status(403).json({ message: "End-to-end encryption is off." });
+      const result = await E2EItemService.migrate(userId, req.body?.items);
+      if (result.moved) {
+        await AuditService.record({ actorId: userId, action: "items_encrypted", details: { count: result.moved }, req });
+      }
+      res.json(result);
+    } catch (error) {
+      console.error("Error storing encrypted items:", error);
+      res.status(500).json({ message: "Error storing encrypted items" });
+    }
+  };
+
+  /** Sealed logins to fill, for the extension to open and match itself. */
+  static e2eAutofill = async (req: any, res: Response) => {
+    try {
+      res.json({ items: await NoteService.sealedAutofillItems(req.user?.id) });
+    } catch (error) {
+      console.error("Error listing sealed logins:", error);
+      res.status(500).json({ message: "Error listing logins" });
+    }
+  };
+
+  /** Make end-to-end items readable again, so they can be shared. */
+  static e2eUnseal = async (req: any, res: Response) => {
+    try {
+      const userId = req.user?.id;
+      const result = await E2EItemService.unseal(userId, req.body?.items, async (noteId) => {
+        const access = await NoteService.getNoteAccess(noteId, userId);
+        return access?.permission === "owner" || access?.permission === "edit";
+      });
+      res.json(result);
+    } catch (error: any) {
+      if (error?.status === 400) return res.status(400).json({ message: error.message });
+      console.error("Error unsealing items:", error);
+      res.status(500).json({ message: "Error unsealing items" });
+    }
+  };
+
   /** Passkeys for a site, for the extension to sign in with. */
   static passkeys = async (req: any, res: Response) => {
     try {
@@ -183,7 +245,13 @@ export default class NoteController {
         isEncrypted,
         collectionId,
         collectionIds,
+        e2e,
+        version,
+        e2eKeys,
       } = req.body;
+      if (e2e && !(await e2eAccount(userId))) {
+        return res.status(403).json({ message: "End-to-end encryption is off." });
+      }
 
       const note = await NoteService.createNote(userId, {
         title,
@@ -195,6 +263,9 @@ export default class NoteController {
         isEncrypted,
         collectionId,
         collectionIds,
+        e2e,
+        version,
+        e2eKeys,
       });
       await AuditService.record({
         actorId: userId,
@@ -204,7 +275,8 @@ export default class NoteController {
       });
 
       res.status(201).json(note);
-    } catch (error) {
+    } catch (error: any) {
+      if (isE2EAnswer(error)) return res.status(409).json(e2eConflictBody(error));
       // Rules people can act on (a company's password length, a collection they can't use).
       if ((error as any)?.status >= 400 && (error as any)?.status < 500) {
         return res.status((error as any).status).json({ message: (error as any).message });
@@ -327,6 +399,9 @@ export default class NoteController {
         isEncrypted,
         collectionId,
         collectionIds,
+        encData,
+        version,
+        e2eKeys,
       } = req.body;
 
       const note = await NoteService.updateNote(noteId, userId, {
@@ -339,6 +414,9 @@ export default class NoteController {
         isEncrypted,
         collectionId,
         collectionIds,
+        encData,
+        version,
+        e2eKeys,
       });
 
       if (!note) {
@@ -349,7 +427,7 @@ export default class NoteController {
         action: "item_updated",
         noteId,
         details: {
-          changed: ["title", "content", "category", "tags", "collectionIds"].filter(
+          changed: ["title", "content", "category", "tags", "collectionIds", "encData"].filter(
             (key) => req.body?.[key] !== undefined
           ),
         },
@@ -358,6 +436,7 @@ export default class NoteController {
 
       res.json(note);
     } catch (error: any) {
+      if (isE2EAnswer(error)) return res.status(409).json(e2eConflictBody(error));
       if (error?.status >= 400 && error?.status < 500) {
         return res.status(error.status).json({ message: error.message });
       }
@@ -455,7 +534,8 @@ export default class NoteController {
         userId,
         Array.isArray(noteIds) ? noteIds : [],
         action,
-        collectionId ?? null
+        collectionId ?? null,
+        req.body?.e2eKeys
       );
       for (const noteId of (result as { noteIds?: number[] }).noteIds || []) {
         await AuditService.record({
@@ -468,6 +548,7 @@ export default class NoteController {
       }
       res.json(result);
     } catch (error: any) {
+      if (isE2EAnswer(error)) return res.status(409).json(e2eConflictBody(error));
       console.error("Error updating notes:", error);
       res.status(error.status || 500).json({
         message: error.status ? error.message : "Error updating notes",
@@ -552,6 +633,7 @@ export default class NoteController {
         list,
         permission || "view",
         expiresAt,
+        req.body?.e2eKeys,
       );
 
       for (const share of result.shared) {
@@ -576,6 +658,8 @@ export default class NoteController {
 
       res.status(201).json(result);
     } catch (error: any) {
+      if (isE2EAnswer(error)) return res.status(409).json(e2eConflictBody(error));
+      if (error instanceof PlanLimitError) return res.status(402).json(planLimitBody(error));
       console.error("Error sharing note:", error);
       res
         .status(error.status || 500)

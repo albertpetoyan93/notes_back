@@ -9,6 +9,7 @@ import path from "path";
 import swaggerUi from "swagger-ui-express";
 import headers from "./middlwares/headers";
 import indexRouter from "./routes/index";
+import BillingController from "./controller/BillingController";
 const swaggerDocument = require("@src/views/swagger-output.json");
 // "dev": "npx ts-node ./src/index.ts --env=production",
 
@@ -21,6 +22,13 @@ app.set("trust proxy", 1);
 app.use("/doc", swaggerUi.serve, swaggerUi.setup(swaggerDocument));
 
 // **** Setup **** //
+
+// Stripe webhooks need the raw body for the signature check, so they come before JSON parsing.
+app.post(
+  "/api/billing/webhooks/stripe",
+  express.raw({ type: "application/json", limit: "1mb" }),
+  BillingController.webhook as express.RequestHandler
+);
 
 // Basic middleware
 app.use(express.json({ limit: "5mb" }));
