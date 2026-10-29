@@ -13,6 +13,13 @@ import { REFRESH_MAX_AGE_MS } from "../util/authCookies";
  */
 const ROTATION_GRACE_MS = 30 * 1000;
 
+/** Why a refresh token was refused. Logged, and sent back so the browser shows it. */
+export class RefreshError extends Error {
+  constructor(public reason: string, public detail: Record<string, unknown> = {}) {
+    super("Invalid refresh token");
+  }
+}
+
 /** Allowed auto-lock times in minutes; 0 = never. */
 export const AUTO_LOCK_CHOICES = [0, 5, 15, 30, 60];
 
@@ -101,8 +108,9 @@ class SessionService {
     const session = await UserSession.findOne({
       where: { id: payload.sid, userId: payload.userId, kind },
     });
-    if (!session || new Date(session.expiresAt).getTime() < Date.now()) {
-      throw new Error("Invalid refresh token");
+    if (!session) throw new RefreshError("no_session", { sid: payload.sid, userId: payload.userId });
+    if (new Date(session.expiresAt).getTime() < Date.now()) {
+      throw new RefreshError("session_expired", { sid: session.id, expiresAt: session.expiresAt });
     }
     // A company policy can limit how old a sign-in may get.
     const { maxSessionDays } = await CompanyPolicyService.forUser(session.userId);
@@ -111,7 +119,7 @@ class SessionService {
       Date.now() - new Date(session.createdAt).getTime() > maxSessionDays * 24 * 60 * 60 * 1000
     ) {
       await session.destroy();
-      throw new Error("Invalid refresh token");
+      throw new RefreshError("max_session_days", { sid: session.id, maxSessionDays });
     }
 
     const presented = hash(payload.jti);
@@ -154,7 +162,11 @@ class SessionService {
       }
     }
 
-    throw new Error("Invalid refresh token");
+    throw new RefreshError("token_reused", {
+      sid: session.id,
+      previousMatches: session.previousTokenHash === presented,
+      secondsSinceRotation: session.rotatedAt ? Math.round((Date.now() - new Date(session.rotatedAt).getTime()) / 1000) : null,
+    });
   }
 
   static async revokeByToken(refreshToken: string | undefined, kind: SessionKind) {
@@ -275,7 +287,7 @@ class SessionService {
     const user = await User.findByPk(payload.userId);
     const field = kind === "web" ? "refreshTokenId" : "extensionRefreshTokenId";
     if (!user || !user[field] || user[field] !== payload.jti) {
-      throw new Error("Invalid refresh token");
+      throw new RefreshError("legacy_token", { userId: payload.userId });
     }
 
     await user.update({ [field]: null });
@@ -284,22 +296,22 @@ class SessionService {
 
   private static readRefreshPayload(refreshToken?: string) {
     if (!refreshToken) {
-      throw new Error("Invalid refresh token");
+      throw new RefreshError("no_cookie");
     }
 
     let payload: jwt.JwtPayload;
     try {
       const decoded = jwt.verify(refreshToken, EnvVars.Jwt.Secret);
       if (typeof decoded === "string") {
-        throw new Error("Invalid refresh token");
+        throw new RefreshError("bad_token");
       }
       payload = decoded;
-    } catch {
-      throw new Error("Invalid refresh token");
+    } catch (error: any) {
+      throw new RefreshError(error?.name === "TokenExpiredError" ? "token_expired" : "bad_token");
     }
 
     if (payload.type !== "refresh" || !payload.userId || !payload.jti) {
-      throw new Error("Invalid refresh token");
+      throw new RefreshError("not_refresh");
     }
 
     return payload as jwt.JwtPayload & { userId: number; jti: string };

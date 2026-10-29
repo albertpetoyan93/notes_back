@@ -5,7 +5,7 @@ import { AuthRequest } from "@src/types";
 import UserService from "@src/services/UserService";
 import { clearAuthCookies, setAuthCookies } from "@src/util/authCookies";
 import User from "@src/models/User";
-import SessionService, { SessionMeta } from "@src/services/SessionService";
+import SessionService, { RefreshError, SessionMeta } from "@src/services/SessionService";
 import TwoFactorService, { TwoFactorError } from "@src/services/TwoFactorService";
 import EmailService from "@src/services/EmailService";
 import logger from "jet-logger";
@@ -291,11 +291,14 @@ export default class AuthController {
       );
       setAuthCookies(res, session.accessToken, session.refreshToken);
       res.status(HttpStatusCodes.OK).send({ ok: true });
-    } catch {
+    } catch (error) {
+      // Why it was refused, to find out why some sessions end early (unlock after idle time).
+      const reason = error instanceof RefreshError ? error.reason : "error";
+      logger.warn(`Refresh refused: ${reason} ${JSON.stringify(error instanceof RefreshError ? error.detail : { message: (error as Error)?.message })}`);
       clearAuthCookies(res);
       res
         .status(HttpStatusCodes.UNAUTHORIZED)
-        .send({ message: "Unauthorized" });
+        .send({ message: "Unauthorized", reason });
     }
   };
 

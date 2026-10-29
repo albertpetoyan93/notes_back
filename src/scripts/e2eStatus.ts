@@ -12,8 +12,8 @@ import EmailService from "../services/EmailService";
  *
  * Server-side decryption (ENCRYPTION_KEY, util/encryption) can be removed only
  * when this reports 0 readable items and 0 readable versions.
- *   npm run e2e:status            (NODE_ENV picks the database)
- *   npm run e2e:remind
+ *   npm run e2e:status / e2e:remind             (development, from src)
+ *   npm run e2e:status:prod / e2e:remind:prod   (production, the built dist/)
  */
 async function main() {
   const remind = process.argv.includes("--remind");
@@ -40,12 +40,15 @@ async function main() {
   );
 
   if (remind) {
+    if (!EmailService.isConfigured()) {
+      console.log("Reminders not sent: email (SMTP_HOST, MAIL_FROM) isn't set up in this env file.");
+      return;
+    }
     const pending = await User.findAll({ where: { e2eEnabled: false }, attributes: ["id", "email"] });
     let sent = 0;
     for (const user of pending) {
       try {
-        await EmailService.sendE2EReminder({ to: user.email, deadline: e2eDeadline() });
-        sent += 1;
+        if (await EmailService.sendE2EReminder({ to: user.email, deadline: e2eDeadline() })) sent += 1;
       } catch (error: any) {
         console.error(`Could not email ${user.email}:`, error?.message || error);
       }

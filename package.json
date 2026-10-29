@@ -15,8 +15,10 @@
     "stripe:setup": "cross-env NODE_ENV=development npx ts-node -r module-alias/register ./src/scripts/stripe-setup.ts",
     "stripe:setup:prod": "cross-env NODE_ENV=production npx ts-node -r module-alias/register ./src/scripts/stripe-setup.ts",
     "reencrypt:dev": "cross-env NODE_ENV=development npx ts-node -r module-alias/register ./src/scripts/reencrypt.ts",
-    "e2e:status": "npx ts-node -r module-alias/register ./src/scripts/e2eStatus.ts",
-    "e2e:remind": "npx ts-node -r module-alias/register ./src/scripts/e2eStatus.ts --remind"
+    "e2e:status": "cross-env NODE_ENV=development npx ts-node -r ./preload.js ./src/scripts/e2eStatus.ts",
+    "e2e:remind": "cross-env NODE_ENV=development npx ts-node -r ./preload.js ./src/scripts/e2eStatus.ts --remind",
+    "e2e:status:prod": "cross-env NODE_ENV=production node -r ./preload.js ./dist/scripts/e2eStatus.js",
+    "e2e:remind:prod": "cross-env NODE_ENV=production node -r ./preload.js ./dist/scripts/e2eStatus.js --remind"
   },
   "engines": {
     "node": ">=16.0.0"
