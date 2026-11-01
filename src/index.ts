@@ -8,6 +8,7 @@ import initializeDatabase from "./configs/DB/init";
 import { assertEncryptionReady } from "./util/encryption";
 import JobService from "./services/JobService";
 import { registerBillingJobs } from "./services/BillingJobs";
+import { registerAnalyticsJobs } from "./services/AnalyticsJobs";
 
 // **** Run **** //
 
@@ -36,6 +37,7 @@ async function start() {
 
     // Daily jobs (trial reminders and expiry), once a day, never twice.
     registerBillingJobs();
+    registerAnalyticsJobs();
     JobService.start();
 
     // Setup graceful shutdown

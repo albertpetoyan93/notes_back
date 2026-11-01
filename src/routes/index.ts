@@ -7,6 +7,9 @@ import companies from "./companies";
 import secrets from "./secrets";
 import billing from "./billing";
 import admin from "./admin";
+import emergency from "./emergency";
+import attachments from "./attachments";
+import files from "./files";
 
 const router = Router();
 
@@ -18,5 +21,8 @@ router.use("/companies", companies);
 router.use("/secrets", secrets);
 router.use("/billing", billing);
 router.use("/admin", admin);
+router.use("/emergency", emergency);
+router.use("/attachments", attachments);
+router.use("/files", files);
 
 export default router;

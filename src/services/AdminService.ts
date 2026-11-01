@@ -1,9 +1,11 @@
-import { Op } from "sequelize";
+import { Op, QueryTypes } from "sequelize";
+import sequelize from "../configs/DB/sequelize";
 import { DISCOUNT_PERCENT, PRICES, PlanId } from "../common/plans";
 import Company from "../models/Company";
 import DiscountRequest from "../models/DiscountRequest";
 import Subscription from "../models/Subscription";
 import User from "../models/User";
+import { utcDate } from "./ActivityService";
 import { isLive } from "./EntitlementService";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -101,6 +103,9 @@ class AdminService {
       order: [["markedForRemovalAt", "ASC"]],
     });
 
+    const activity = await this.activity(now);
+    const suspendedAccounts = await User.count({ where: { suspendedAt: { [Op.ne]: null } } });
+
     return {
       users: {
         total: await User.count(),
@@ -134,6 +139,81 @@ class AdminService {
           markedForRemovalAt: company.markedForRemovalAt ?? null,
         })),
       },
+      suspendedAccounts,
+      activity,
+    };
+  }
+
+  /** Signups and activity as counts only: no names, no item data. */
+  private async activity(now: Date) {
+    const today = utcDate(now);
+    const startOfToday = new Date(`${today}T00:00:00.000Z`);
+    const ago = (days: number) => new Date(now.getTime() - days * DAY_MS);
+    const dayAgo = (days: number) => utcDate(new Date(startOfToday.getTime() - days * DAY_MS));
+    const num = (value: unknown) => Number(value) || 0;
+
+    const [signups] = await sequelize.query<Record<string, string>>(
+      `SELECT
+        COUNT(*) FILTER (WHERE "createdAt" >= :startOfToday) AS today,
+        COUNT(*) FILTER (WHERE "createdAt" >= :d7) AS d7,
+        COUNT(*) FILTER (WHERE "createdAt" >= :d30) AS d30,
+        COUNT(*) FILTER (WHERE "createdAt" >= :d14 AND "createdAt" < :d7) AS "prevD7",
+        COUNT(*) FILTER (WHERE "createdAt" >= :d60 AND "createdAt" < :d30) AS "prevD30"
+       FROM "users" WHERE "createdAt" >= :d60`,
+      {
+        replacements: { startOfToday, d7: ago(7), d14: ago(14), d30: ago(30), d60: ago(60) },
+        type: QueryTypes.SELECT,
+      }
+    );
+
+    // Active days: today, the last 7 and the last 30 UTC days (today included).
+    const [active] = await sequelize.query<Record<string, string>>(
+      `SELECT
+        COUNT(DISTINCT "userId") FILTER (WHERE "date" = :today) AS day,
+        COUNT(DISTINCT "userId") FILTER (WHERE "date" >= :week) AS week,
+        COUNT(DISTINCT "userId") AS month
+       FROM "user_activity_days" WHERE "date" >= :month AND "date" <= :today`,
+      { replacements: { today, week: dayAgo(6), month: dayAgo(29) }, type: QueryTypes.SELECT }
+    );
+
+    // Rows are only counted: never selected.
+    const [activation] = await sequelize.query<Record<string, string>>(
+      `SELECT COUNT(*) AS total,
+        COUNT(*) FILTER (WHERE EXISTS (SELECT 1 FROM "notes" WHERE "notes"."userId" = "users"."id")) AS activated
+       FROM "users" WHERE "createdAt" >= :d30`,
+      { replacements: { d30: ago(30) }, type: QueryTypes.SELECT }
+    );
+
+    const from = dayAgo(89);
+    const signupDays = await sequelize.query<{ date: string; n: string }>(
+      `SELECT to_char(("createdAt" AT TIME ZONE 'UTC')::date, 'YYYY-MM-DD') AS date, COUNT(*) AS n
+       FROM "users" WHERE "createdAt" >= :from GROUP BY 1`,
+      { replacements: { from: new Date(`${from}T00:00:00.000Z`) }, type: QueryTypes.SELECT }
+    );
+    const activeDays = await sequelize.query<{ date: string; n: string }>(
+      `SELECT to_char("date", 'YYYY-MM-DD') AS date, COUNT(DISTINCT "userId") AS n
+       FROM "user_activity_days" WHERE "date" >= :from AND "date" <= :today GROUP BY 1`,
+      { replacements: { from, today }, type: QueryTypes.SELECT }
+    );
+    const signupBy = new Map(signupDays.map((row) => [row.date, num(row.n)]));
+    const activeBy = new Map(activeDays.map((row) => [row.date, num(row.n)]));
+    const daily = Array.from({ length: 90 }, (_, i) => {
+      const date = dayAgo(89 - i);
+      return { date, signups: signupBy.get(date) ?? 0, active: activeBy.get(date) ?? 0 };
+    });
+
+    const total = num(activation?.total);
+    return {
+      signups: {
+        today: num(signups?.today),
+        d7: num(signups?.d7),
+        d30: num(signups?.d30),
+        prevD7: num(signups?.prevD7),
+        prevD30: num(signups?.prevD30),
+      },
+      activeUsers: { day: num(active?.day), week: num(active?.week), month: num(active?.month) },
+      activationRate30d: total ? num(activation?.activated) / total : 0,
+      daily,
     };
   }
 }

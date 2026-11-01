@@ -9,6 +9,7 @@ import Note from "../models/Note";
 import User from "../models/User";
 import CollectionService from "./CollectionService";
 import SignInAlertService from "./SignInAlertService";
+import GroupService from "./GroupService";
 
 /** Every action the log knows. The vault app has a label for each. */
 export const AUDIT_ACTIONS = [
@@ -36,6 +37,7 @@ export const AUDIT_ACTIONS = [
   "company_recovery_enabled",
   "company_recovery_disabled",
   "master_password_reset_by_admin",
+  "support_action",
   // Items
   "item_created",
   "item_updated",
@@ -44,6 +46,9 @@ export const AUDIT_ACTIONS = [
   "item_moved",
   "item_version_viewed",
   "item_version_restored",
+  "attachment_added",
+  "attachment_downloaded",
+  "attachment_deleted",
   "trash_emptied",
   "field_revealed",
   "field_copied",
@@ -65,6 +70,16 @@ export const AUDIT_ACTIONS = [
   "member_removed",
   "member_role_changed",
   "company_policy_changed",
+  "group_created",
+  "group_renamed",
+  "group_deleted",
+  "group_member_added",
+  "group_member_removed",
+  "collection_group_shared",
+  "collection_group_unshared",
+  "group_join_requested",
+  "group_request_approved",
+  "group_request_declined",
   // Billing
   "trial_started",
   "family_invited",
@@ -72,11 +87,34 @@ export const AUDIT_ACTIONS = [
   "family_left",
   "company_exported",
   "discount_requested",
+  // Emergency access
+  "emergency_invited",
+  "emergency_accepted",
+  "emergency_confirmed",
+  "emergency_requested",
+  "emergency_approved",
+  "emergency_refused",
+  "emergency_removed",
+  "emergency_left",
+  "emergency_viewed",
 ] as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];
 
-const ACCOUNT_ACTIONS: AuditAction[] = [
+/** Emergency access: shown to both people, whichever of them acted. */
+const EMERGENCY_ACTIONS: AuditAction[] = [
+  "emergency_invited",
+  "emergency_accepted",
+  "emergency_confirmed",
+  "emergency_requested",
+  "emergency_approved",
+  "emergency_refused",
+  "emergency_removed",
+  "emergency_left",
+  "emergency_viewed",
+];
+
+export const ACCOUNT_ACTIONS: AuditAction[] = [
   "trial_started",
   "family_invited",
   "family_joined",
@@ -111,6 +149,15 @@ const ACCOUNT_ACTIONS: AuditAction[] = [
   "secret_link_created",
   "secret_link_revoked",
   "secret_link_opened",
+  "support_action",
+];
+
+/** What staff see in a user's activity: account events, minus secret-link ones (they hint at vault items). */
+export const USER_ACTIVITY_ACTIONS: AuditAction[] = [
+  ...new Set<AuditAction>([
+    ...ACCOUNT_ACTIONS.filter((action) => !action.startsWith("secret_link_")),
+    "support_action",
+  ]),
 ];
 
 // Revealing the same field over and over is one event, not fifty.
@@ -245,7 +292,12 @@ class AuditService {
   /** Sign-ins and security changes on your own account. */
   async accountActivity(userId: number, before?: number) {
     return this.page(
-      { actorId: userId, action: { [Op.in]: ACCOUNT_ACTIONS } },
+      {
+        [Op.or]: [
+          { actorId: userId, action: { [Op.in]: ACCOUNT_ACTIONS } },
+          { [Op.or]: [{ actorId: userId }, { targetUserId: userId }], action: { [Op.in]: EMERGENCY_ACTIONS } },
+        ],
+      },
       before
     );
   }
@@ -277,6 +329,9 @@ class AuditService {
       attributes: ["role"],
     });
     const manager = member?.role === "owner" || member?.role === "admin";
+    const viaGroups = await GroupService.forUser(memberUserId, collections.map((item) => item.id));
+    const best = (...values: (string | null | undefined)[]) =>
+      values.includes("edit") ? "edit" : values.includes("view") ? "view" : null;
     const accessible = collections
       .map((collection) => ({
         id: collection.id,
@@ -284,7 +339,7 @@ class AuditService {
         name: collection.encName ? "" : collection.name,
         permission: manager
           ? "edit"
-          : shareByCollection.get(collection.id) || collection.companyShare || null,
+          : best(shareByCollection.get(collection.id), collection.companyShare, viaGroups.get(collection.id)),
       }))
       .filter((collection) => collection.permission);
 

@@ -12,6 +12,7 @@ import { SharePermission } from "../models/NoteShare";
 import NotificationService from "./NotificationService";
 import E2EItemService, { collectionLabel, nameFields, placeholderName, assertEncName } from "./E2EItemService";
 import CollectionKey from "../models/CollectionKey";
+import GroupService from "./GroupService";
 
 class CollectionService {
   private activeShareFilter(where: Record<string, unknown>) {
@@ -43,7 +44,8 @@ class CollectionService {
       const share = await CollectionShare.findOne({
         where: this.activeShareFilter({ collectionId, sharedWithUserId: userId }),
       });
-      const permission = this.memberPermission(collection.companyShare, share?.permission);
+      const viaGroup = (await GroupService.forUser(userId, [collectionId])).get(collectionId);
+      const permission = this.memberPermission(collection.companyShare, share?.permission, viaGroup);
       if (!permission) return null;
       return { collection, permission };
     }
@@ -209,13 +211,16 @@ class CollectionService {
     }
     const countById = await this.noteCounts(ids);
     const myKeys = await this.myCollectionKeys(userId, ids);
+    const viaGroups = access.role === "member" ? await GroupService.forUser(userId, ids) : new Map<number, SharePermission>();
+    const groupShares = access.role === "member" ? null : await GroupService.sharesOf(ids);
     const visible =
       access.role === "member"
         ? collections.filter(
             (collection) =>
               collection.companyShare === "view" ||
               collection.companyShare === "edit" ||
-              directByCollection.has(collection.id)
+              directByCollection.has(collection.id) ||
+              viaGroups.has(collection.id)
           )
         : collections;
     return visible.map((collection) => {
@@ -225,7 +230,7 @@ class CollectionService {
           : null;
       const permission =
         access.role === "member"
-          ? this.memberPermission(companyShare, directByCollection.get(collection.id)) || "view"
+          ? this.memberPermission(companyShare, directByCollection.get(collection.id), viaGroups.get(collection.id)) || "view"
           : ("owner" as const);
       return {
         id: collection.id,
@@ -234,6 +239,7 @@ class CollectionService {
         permission,
         companyShare,
         shares: access.role === "member" ? [] : peopleByCollection.get(collection.id) || [],
+        groups: groupShares?.get(collection.id) || [],
       };
     });
   }
@@ -359,16 +365,17 @@ class CollectionService {
     return { id: collection.id, name: collection.name, noteCount: 0, permission: "owner" as const };
   }
 
+  /** A member's access to a company collection: the best of everyone, a share to them, and their groups. */
   private memberPermission(
     companyShare?: string | null,
-    direct?: SharePermission | null
+    direct?: SharePermission | null,
+    group?: SharePermission | null
   ): SharePermission | null {
     const allowed = (value?: string | null): SharePermission | null =>
       value === "edit" || value === "view" ? value : null;
-    const everyone = allowed(companyShare);
-    const person = allowed(direct);
-    if (everyone === "edit" || person === "edit") return "edit";
-    if (everyone || person) return "view";
+    const all = [allowed(companyShare), allowed(direct), allowed(group)];
+    if (all.includes("edit")) return "edit";
+    if (all.includes("view")) return "view";
     return null;
   }
 
@@ -428,10 +435,15 @@ class CollectionService {
       const direct = new Map(
         shares.map((share) => [share.collectionId, share.permission])
       );
+      const viaGroups = await GroupService.forUser(
+        userId,
+        collections.map((collection) => collection.id)
+      );
       for (const collection of collections) {
         const permission = this.memberPermission(
           collection.companyShare,
-          direct.get(collection.id)
+          direct.get(collection.id),
+          viaGroups.get(collection.id)
         );
         if (permission) result.set(collection.id, permission);
       }

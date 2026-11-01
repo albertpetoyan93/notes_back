@@ -225,6 +225,27 @@ class EmailService {
     return this.deliver(input.to, subject, text, html);
   }
 
+  /** Support asked to turn off 2FA; nothing changes unless the user confirms. */
+  async sendRemoveTwoFactorConfirm(input: { to: string; link: string; expiresAt: Date }) {
+    const until = `${input.expiresAt.toLocaleString("en-GB", {
+      timeZone: "UTC",
+      dateStyle: "medium",
+      timeStyle: "short",
+    })} UTC`;
+    const subject = "Confirm turning off two-step sign-in on 2keevo";
+    const asked = "2keevo support asked to turn off two-step sign-in for your account.";
+    const how = `To turn it off, open the link below and confirm. You'll be signed out on every device. The link is valid for 24 hours (until ${until}).`;
+    const ignore = "If you didn't ask 2keevo support for this, ignore this email and nothing will change.";
+    const text = [asked, "", how, "", input.link, "", ignore].join("\n");
+    const html = `<div style="font-family:Segoe UI,sans-serif;color:#1f2937;line-height:1.5;">
+<p style="margin:0 0 16px;">${escapeHtml(asked)}</p>
+<p style="margin:0 0 16px;">${escapeHtml(how)}</p>
+<p style="margin:0 0 20px;"><a href="${escapeHtml(input.link)}" style="display:inline-block;background:#6d5efc;color:#ffffff;text-decoration:none;padding:10px 16px;border-radius:8px;">Review the request</a></p>
+<p style="margin:0;color:#6b7280;font-size:13px;">${escapeHtml(ignore)}</p>
+</div>`;
+    return this.deliver(input.to, subject, text, html);
+  }
+
   /** Accounts that haven't turned on end-to-end encryption yet (npm run e2e:remind). */
   async sendE2EReminder(input: { to: string; deadline: string | null }) {
     const origin = EnvVars.FrontendOrigin || "http://localhost:5173";
@@ -401,6 +422,68 @@ ${paragraphs.map((paragraph) => `<p style="margin:0 0 16px;">${escapeHtml(paragr
         "Members' personal vaults are never removed. To keep the company's items, subscribe to Team or export them before that date.",
       ],
       { label: "Keep the company", path: "/settings/billing" }
+    );
+  }
+
+  /* Emergency access ------------------------------------------------------------- */
+
+  async sendEmergencyInvite(input: { to: string; from: string; waitDays: number }) {
+    return this.notice(
+      input.to,
+      `${input.from} asked you to be their emergency contact on 2keevo`,
+      [
+        `${input.from} would like you to be able to reach their 2keevo vault if something happens to them.`,
+        `If you ever ask for access, ${input.from} has ${input.waitDays} ${input.waitDays === 1 ? "day" : "days"} to refuse. After that you can read their personal vault, but not change it.`,
+        "If you don't have a 2keevo account yet, sign up with this email address first, then accept on the Emergency access page.",
+      ],
+      { label: "Open the invitation", path: "/emergency" }
+    );
+  }
+
+  /** To the owner: a contact asked for access (and the reminders while it waits). */
+  async sendEmergencyRequested(input: { to: string; from: string; grantsAt: Date; reminder: boolean }) {
+    return this.notice(
+      input.to,
+      `${input.reminder ? "Reminder: " : ""}${input.from} asked for emergency access to your vault`,
+      [
+        `${input.from}, your emergency contact, asked for access to your 2keevo vault.`,
+        `If you do nothing, they can read your personal vault from ${this.day(input.grantsAt)}. If you didn't expect this, refuse the request now.`,
+      ],
+      { label: "Review the request", path: "/emergency" }
+    );
+  }
+
+  async sendEmergencyGranted(input: { to: string; from: string }) {
+    return this.notice(
+      input.to,
+      `You now have emergency access to ${input.from}'s vault`,
+      [`You can now read ${input.from}'s personal 2keevo vault. Open it from the Emergency access page.`],
+      { label: "Open the vault", path: "/emergency" }
+    );
+  }
+
+  async sendEmergencyGrantedOwner(input: { to: string; contact: string }) {
+    return this.notice(
+      input.to,
+      `${input.contact} now has emergency access to your vault`,
+      [
+        `The waiting time ended, so ${input.contact} can now read your personal 2keevo vault.`,
+        "If this is a mistake, end their access on the Emergency access page. It stops at once.",
+      ],
+      { label: "Emergency access", path: "/emergency" }
+    );
+  }
+
+  async sendEmergencyRefused(input: { to: string; from: string; ended: boolean }) {
+    return this.notice(
+      input.to,
+      input.ended ? `${input.from} ended your emergency access` : `${input.from} refused your emergency access request`,
+      [
+        input.ended
+          ? `${input.from} ended your access to their 2keevo vault. You're still their emergency contact and can ask again.`
+          : `${input.from} refused your request for access to their 2keevo vault. You're still their emergency contact.`,
+      ],
+      { label: "Emergency access", path: "/emergency" }
     );
   }
 

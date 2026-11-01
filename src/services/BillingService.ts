@@ -1,5 +1,6 @@
 import { Op, UniqueConstraintError } from "sequelize";
 import sequelize from "../configs/DB/sequelize";
+import Attachment from "../models/Attachment";
 import {
   DISCOUNT_PERCENT,
   PLANS,
@@ -191,7 +192,11 @@ class BillingService {
       subscription: publicSubscription(
         entitlement.source === "own" ? entitlement.subscription : own,
       ),
-      usage: { collections: ownCollections },
+      usage: {
+        collections: ownCollections,
+        // Files on their own items (company items count against the company).
+        storageBytes: Number((await Attachment.sum("size", { where: { ownerUserId: userId, companyId: null } })) || 0),
+      },
       trials: {
         premium:
           !usedTrials.some((trial) => trial.plan === "premium") &&

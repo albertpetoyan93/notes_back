@@ -2,3 +2,5 @@
 dist/
 **/**/*.log
 env/*.env
+# Attachment files in development (local storage driver)
+storage/

@@ -25,6 +25,15 @@ import Subscription from "./Subscription";
 import TrialUsed from "./TrialUsed";
 import FamilyMember from "./FamilyMember";
 import DiscountRequest from "./DiscountRequest";
+import EmergencyContact from "./EmergencyContact";
+import Attachment from "./Attachment";
+import AdminStaff from "./AdminStaff";
+import AdminAction from "./AdminAction";
+import UserActivityDay from "./UserActivityDay";
+import SupportRequest from "./SupportRequest";
+import MetricsDaily from "./MetricsDaily";
+import SignupSource from "./SignupSource";
+import { CompanyGroup, CompanyGroupMember, CollectionGroupShare, GroupRequest } from "./CompanyGroup";
 
 // Define all associations here to avoid circular dependencies
 function setupAssociations() {
@@ -268,6 +277,13 @@ function setupAssociations() {
 
   AuditEvent.belongsTo(User, { as: "actor", foreignKey: "actorId", constraints: false });
   AuditEvent.belongsTo(User, { as: "target", foreignKey: "targetUserId", constraints: false });
+
+  AdminStaff.belongsTo(User, { as: "user", foreignKey: "userId", onDelete: "CASCADE" });
+  AdminAction.belongsTo(User, { as: "staff", foreignKey: "staffUserId", constraints: false });
+  AdminAction.belongsTo(User, { as: "target", foreignKey: "targetUserId", constraints: false });
+  UserActivityDay.belongsTo(User, { as: "user", foreignKey: "userId", onDelete: "CASCADE" });
+  SignupSource.belongsTo(User, { as: "user", foreignKey: "userId", onDelete: "CASCADE" });
+  SupportRequest.belongsTo(User, { as: "user", foreignKey: "userId", onDelete: "CASCADE" });
 }
 
 // Export default object with all models
@@ -291,5 +307,17 @@ export default {
   TrialUsed,
   FamilyMember,
   DiscountRequest,
+  EmergencyContact,
+  Attachment,
+  AdminStaff,
+  AdminAction,
+  UserActivityDay,
+  SupportRequest,
+  MetricsDaily,
+  SignupSource,
+  CompanyGroup,
+  CompanyGroupMember,
+  CollectionGroupShare,
+  GroupRequest,
   setupAssociations,
 };

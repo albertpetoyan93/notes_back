@@ -1,7 +1,7 @@
 import { DataTypes, Model, Optional } from "sequelize";
 import sequelize from "../configs/DB/sequelize";
 
-export type SessionKind = "web" | "extension";
+export type SessionKind = "web" | "extension" | "admin";
 
 interface UserSessionAttributes {
   id: number;
@@ -12,6 +12,8 @@ interface UserSessionAttributes {
   rotatedAt?: Date | null;
   userAgent?: string | null;
   ip?: string | null;
+  /** Last X-Keevo-Extension-Version from an extension session. */
+  extensionVersion?: string | null;
   lastUsedAt: Date;
   /** Last real input from the person (web sessions); drives auto-lock. */
   lastActiveAt?: Date | null;
@@ -29,6 +31,7 @@ type UserSessionCreation = Optional<
   | "rotatedAt"
   | "userAgent"
   | "ip"
+  | "extensionVersion"
   | "lastUsedAt"
   | "lastActiveAt"
   | "lockedAt"
@@ -48,6 +51,7 @@ class UserSession
   public rotatedAt?: Date | null;
   public userAgent?: string | null;
   public ip?: string | null;
+  public extensionVersion?: string | null;
   public lastUsedAt!: Date;
   public lastActiveAt?: Date | null;
   public lockedAt?: Date | null;
@@ -90,6 +94,10 @@ UserSession.init(
     },
     ip: {
       type: DataTypes.STRING(100),
+      allowNull: true,
+    },
+    extensionVersion: {
+      type: DataTypes.STRING(32),
       allowNull: true,
     },
     lastUsedAt: {

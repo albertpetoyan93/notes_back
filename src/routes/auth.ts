@@ -2,6 +2,7 @@ import AuthController from "@src/controller/AuthController";
 import LockController from "@src/controller/LockController";
 import E2EController from "@src/controller/E2EController";
 import PasskeyController from "@src/controller/PasskeyController";
+import SupportRequestController from "@src/controller/SupportRequestController";
 import isAuth from "@src/middlwares/isAuth";
 import rateLimit from "express-rate-limit";
 import { Router } from "express";
@@ -9,7 +10,7 @@ import { Router } from "express";
 const router = Router();
 
 // Tighter than authLimiter: a 6-digit code is the only thing being guessed.
-const twoFactorLimiter = rateLimit({
+export const twoFactorLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 10,
   standardHeaders: true,
@@ -17,7 +18,7 @@ const twoFactorLimiter = rateLimit({
   message: { message: "Too many attempts. Try again in 15 minutes." },
 });
 
-const authLimiter = rateLimit({
+export const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 20,
   standardHeaders: true,
@@ -28,7 +29,7 @@ const authLimiter = rateLimit({
 // Prelogin and passkey options only fetch what a sign-in needs (the login page
 // asks on every visit), so they get their own budget instead of using up
 // sign-in attempts.
-const lookupLimiter = rateLimit({
+export const lookupLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 60,
   standardHeaders: true,
@@ -76,6 +77,8 @@ router.post(
   twoFactorLimiter,
   AuthController.twoFactorRecoveryCodes as any
 );
+// The emailed link for support's 2FA removal: the token is the only proof, so no sign-in.
+router.post("/support-requests/confirm", twoFactorLimiter, SupportRequestController.confirm);
 // Passkeys: sign in without a password, and manage the ones on the account.
 router.post("/passkeys/login/options", lookupLimiter, PasskeyController.loginOptions);
 router.post("/passkeys/login/verify", authLimiter, PasskeyController.login);

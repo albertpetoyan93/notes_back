@@ -13,6 +13,7 @@ import NoteShare from "../models/NoteShare";
 import NoteVersion from "../models/NoteVersion";
 import User from "../models/User";
 import { decryptContent, encryptContent, isDecryptionFailure } from "../util/encryption";
+import GroupService from "./GroupService";
 
 /**
  * Items encrypted in the browser (E2E_DESIGN.md, stages 10.3 and 10.4).
@@ -210,6 +211,11 @@ class E2EItemService {
         })
       : [];
 
+    // People who reach a company collection through one of their groups.
+    const viaGroups = await GroupService.byCollection(
+      collections.filter((item) => item.companyId && activeCompanies.has(item.companyId)).map((item) => item.id)
+    );
+
     const idsByCollection = new Map<number, Set<number>>();
     for (const collection of collections) {
       const people = new Set<number>();
@@ -221,7 +227,9 @@ class E2EItemService {
           const everyone = collection.companyShare === "view" || collection.companyShare === "edit";
           for (const member of companyMembers.filter((row) => row.companyId === collection.companyId)) {
             const userId = member.userId as number;
-            if (member.role !== "member" || everyone || sharedWith.includes(userId)) people.add(userId);
+            if (member.role !== "member" || everyone || sharedWith.includes(userId) || viaGroups.get(collection.id)?.has(userId)) {
+              people.add(userId);
+            }
           }
         }
       } else {

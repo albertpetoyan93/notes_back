@@ -30,6 +30,8 @@ interface UserAttributes {
   protectedPrivateKey?: string | null;
   recoveryProtectedUserKey?: string | null;
   recoveryAuthHash?: string | null;
+  /** Staff suspended the account: sign-in and refresh are refused. */
+  suspendedAt?: Date | null;
   createdAt?: Date;
   updatedAt?: Date;
 }
@@ -58,6 +60,7 @@ interface UserCreationAttributes
     | "protectedPrivateKey"
     | "recoveryProtectedUserKey"
     | "recoveryAuthHash"
+    | "suspendedAt"
     | "createdAt"
     | "updatedAt"
   > {}
@@ -90,6 +93,7 @@ class User
   public protectedPrivateKey?: string | null;
   public recoveryProtectedUserKey?: string | null;
   public recoveryAuthHash?: string | null;
+  public suspendedAt?: Date | null;
   public readonly createdAt!: Date;
   public readonly updatedAt!: Date;
 
@@ -163,6 +167,7 @@ User.init(
     protectedPrivateKey: { type: DataTypes.TEXT, allowNull: true },
     recoveryProtectedUserKey: { type: DataTypes.TEXT, allowNull: true },
     recoveryAuthHash: { type: DataTypes.STRING(100), allowNull: true },
+    suspendedAt: { type: DataTypes.DATE, allowNull: true },
     twoFactorSecret: {
       type: DataTypes.TEXT,
       allowNull: true,

@@ -1,6 +1,6 @@
 import crypto from "crypto";
 import jwt from "jsonwebtoken";
-import { Op } from "sequelize";
+import { Op, Transaction } from "sequelize";
 import EnvVars from "../common/EnvVars";
 import User from "../models/User";
 import UserSession, { SessionKind } from "../models/UserSession";
@@ -12,6 +12,20 @@ import { REFRESH_MAX_AGE_MS } from "../util/authCookies";
  * the same moment do not sign each other out (the browser shares the cookie).
  */
 const ROTATION_GRACE_MS = 30 * 1000;
+
+/** Staff sessions end after 30 minutes without use, and 12 hours after sign-in. */
+export const ADMIN_IDLE_MS = 30 * 60 * 1000;
+export const ADMIN_MAX_MS = 12 * 60 * 60 * 1000;
+
+export function adminSessionUsable(
+  s: { createdAt: Date; lastActiveAt: Date | null },
+  now: number
+): boolean {
+  const created = new Date(s.createdAt).getTime();
+  // No recorded activity yet: count idle time from sign-in.
+  const lastActive = s.lastActiveAt ? new Date(s.lastActiveAt).getTime() : created;
+  return now - created <= ADMIN_MAX_MS && now - lastActive <= ADMIN_IDLE_MS;
+}
 
 /** Why a refresh token was refused. Logged, and sent back so the browser shows it. */
 export class RefreshError extends Error {
@@ -29,11 +43,14 @@ const ACTIVITY_SLACK_MS = 90 * 1000;
 export interface SessionState {
   active: boolean;
   locked: boolean;
+  /** Null when there is no usable session. */
+  kind: SessionKind | null;
 }
 
 export interface SessionMeta {
   userAgent?: string;
   ip?: string;
+  extensionVersion?: string | null;
 }
 
 export interface SessionTokens {
@@ -55,11 +72,30 @@ function expiry() {
   return new Date(Date.now() + REFRESH_MAX_AGE_MS);
 }
 
+type AccessType = "access" | "admin_access";
+
+/** Admin sessions get their own token type, so vault routes never accept them. */
+function accessType(kind: SessionKind): AccessType {
+  return kind === "admin" ? "admin_access" : "access";
+}
+
 function metaFields(meta: SessionMeta) {
   return {
     userAgent: meta.userAgent ? meta.userAgent.slice(0, 500) : null,
     ip: meta.ip ? meta.ip.slice(0, 100) : null,
+    // Only touch the column when the caller set it (extension traffic).
+    ...(meta.extensionVersion !== undefined
+      ? { extensionVersion: meta.extensionVersion ? meta.extensionVersion.slice(0, 32) : null }
+      : {}),
   };
+}
+
+/** Every kind of sign-in and refresh goes through here, so one check covers them all. */
+async function refuseSuspended(userId: number) {
+  const user = await User.findByPk(userId, { attributes: ["suspendedAt"] });
+  if (user?.suspendedAt) {
+    throw Object.assign(new Error("This account is suspended. Contact support."), { status: 403, code: "suspended" });
+  }
 }
 
 class SessionService {
@@ -68,6 +104,7 @@ class SessionService {
     kind: SessionKind,
     meta: SessionMeta
   ): Promise<SessionTokens> {
+    await refuseSuspended(userId);
     await UserSession.destroy({
       where: { userId, expiresAt: { [Op.lt]: new Date() } },
     });
@@ -79,12 +116,12 @@ class SessionService {
       tokenHash: hash(tokenId),
       lastUsedAt: new Date(),
       lastActiveAt: new Date(),
-      expiresAt: expiry(),
+      expiresAt: kind === "admin" ? new Date(Date.now() + ADMIN_MAX_MS) : expiry(),
       ...metaFields(meta),
     });
 
     return {
-      accessToken: this.signAccessToken(userId, session.id),
+      accessToken: this.signAccessToken(userId, session.id, accessType(kind)),
       refreshToken: this.signRefreshToken(userId, session.id, tokenId),
       sessionId: session.id,
     };
@@ -102,6 +139,8 @@ class SessionService {
     const payload = this.readRefreshPayload(refreshToken);
 
     if (!payload.sid) {
+      // Admin sessions never had legacy tokens.
+      if (kind === "admin") throw new RefreshError("legacy_token", { userId: payload.userId });
       return this.upgradeLegacy(payload, kind, meta);
     }
 
@@ -112,6 +151,16 @@ class SessionService {
     if (new Date(session.expiresAt).getTime() < Date.now()) {
       throw new RefreshError("session_expired", { sid: session.id, expiresAt: session.expiresAt });
     }
+    if (
+      kind === "admin" &&
+      !adminSessionUsable(
+        { createdAt: session.createdAt, lastActiveAt: session.lastActiveAt ?? null },
+        Date.now()
+      )
+    ) {
+      throw new RefreshError("session_expired", { sid: session.id, kind });
+    }
+    await refuseSuspended(session.userId);
     // A company policy can limit how old a sign-in may get.
     const { maxSessionDays } = await CompanyPolicyService.forUser(session.userId);
     if (
@@ -131,7 +180,8 @@ class SessionService {
         previousTokenHash: presented,
         rotatedAt: new Date(),
         lastUsedAt: new Date(),
-        expiresAt: expiry(),
+        // An admin session ends 12 hours after sign-in, however often it refreshes.
+        ...(kind === "admin" ? {} : { expiresAt: expiry() }),
         ...metaFields(meta),
       },
       { where: { id: session.id, tokenHash: presented } }
@@ -139,7 +189,7 @@ class SessionService {
 
     if (rotated === 1) {
       return {
-        accessToken: this.signAccessToken(session.userId, session.id),
+        accessToken: this.signAccessToken(session.userId, session.id, accessType(kind)),
         refreshToken: this.signRefreshToken(session.userId, session.id, tokenId),
         sessionId: session.id,
       };
@@ -180,6 +230,7 @@ class SessionService {
         });
         return;
       }
+      if (kind === "admin") return;
 
       const user = await User.findByPk(payload.userId);
       const field = kind === "web" ? "refreshTokenId" : "extensionRefreshTokenId";
@@ -205,9 +256,10 @@ class SessionService {
       where: { id: sessionId, userId, expiresAt: { [Op.gt]: new Date() } },
       attributes: ["id", "kind", "lastActiveAt", "lockedAt"],
     });
-    if (!session) return { active: false, locked: false };
-    if (session.kind !== "web") return { active: true, locked: false };
-    if (session.lockedAt) return { active: true, locked: true };
+    if (!session) return { active: false, locked: false, kind: null };
+    const { kind } = session;
+    if (kind !== "web") return { active: true, locked: false, kind };
+    if (session.lockedAt) return { active: true, locked: true, kind };
 
     const lastActive = session.lastActiveAt ? new Date(session.lastActiveAt).getTime() : 0;
     if (
@@ -216,9 +268,9 @@ class SessionService {
       Date.now() - lastActive > autoLockMinutes * 60 * 1000 + ACTIVITY_SLACK_MS
     ) {
       await session.update({ lockedAt: new Date() });
-      return { active: true, locked: true };
+      return { active: true, locked: true, kind };
     }
-    return { active: true, locked: false };
+    return { active: true, locked: false, kind };
   }
 
   static async lock(sessionId: number, userId: number) {
@@ -243,6 +295,14 @@ class SessionService {
     );
   }
 
+  /** Remember the extension build on this session (fire-and-forget from isAuth). */
+  static noteExtensionVersion(sessionId: number, userId: number, version: string) {
+    void UserSession.update(
+      { extensionVersion: version.slice(0, 32) },
+      { where: { id: sessionId, userId, kind: "extension" } }
+    ).catch(() => undefined);
+  }
+
   static async isActive(sessionId: number, userId: number) {
     const count = await UserSession.count({
       where: { id: sessionId, userId, expiresAt: { [Op.gt]: new Date() } },
@@ -263,14 +323,27 @@ class SessionService {
   }
 
   /** Sign out every device, optionally keeping the one making the request. */
-  static async revokeAll(userId: number, exceptSessionId?: number) {
+  static async revokeAll(userId: number, exceptSessionId?: number, transaction?: Transaction) {
     await UserSession.destroy({
       where: exceptSessionId
         ? { userId, id: { [Op.ne]: exceptSessionId } }
         : { userId },
+      transaction,
     });
     await User.update(
       { refreshTokenId: null, extensionRefreshTokenId: null },
+      { where: { id: userId }, transaction }
+    );
+  }
+
+  /** Sign out the vault app and the extension only; staff stay signed in to the admin app. */
+  static async revokeKinds(userId: number, kinds: Exclude<SessionKind, "admin">[]) {
+    await UserSession.destroy({ where: { userId, kind: { [Op.in]: kinds } } });
+    await User.update(
+      {
+        ...(kinds.includes("web") ? { refreshTokenId: null } : {}),
+        ...(kinds.includes("extension") ? { extensionRefreshTokenId: null } : {}),
+      },
       { where: { id: userId } }
     );
   }
@@ -317,8 +390,8 @@ class SessionService {
     return payload as jwt.JwtPayload & { userId: number; jti: string };
   }
 
-  private static signAccessToken(userId: number, sid: number) {
-    return jwt.sign({ userId, type: "access", sid }, EnvVars.Jwt.Secret, {
+  private static signAccessToken(userId: number, sid: number, type: AccessType = "access") {
+    return jwt.sign({ userId, type, sid }, EnvVars.Jwt.Secret, {
       expiresIn: "15m",
     });
   }

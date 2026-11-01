@@ -8,6 +8,7 @@ import NoteShare from "../models/NoteShare";
 import User from "../models/User";
 import CollectionService from "./CollectionService";
 import { collectionLabel } from "./E2EItemService";
+import GroupService from "./GroupService";
 
 /** One way a person reaches an item. */
 export type AccessRoute =
@@ -29,6 +30,8 @@ export type AccessRoute =
       /** owner/admin see every company collection; members need a share. */
       role: "owner" | "admin" | "member";
       everyone: boolean;
+      /** Through one of their groups (and not by name). */
+      group?: boolean;
     };
 
 export interface AccessPerson {
@@ -119,6 +122,9 @@ class AccessService {
         })
       : [];
     members.forEach((member) => remember(member.get("user") as UserRow));
+    const viaGroups = await GroupService.byCollection(
+      collections.filter((item) => item.companyId && activeCompanyIds.has(item.companyId)).map((item) => item.id)
+    );
 
     const collectionOwnerIds = collections
       .filter((item) => !item.companyId)
@@ -162,10 +168,16 @@ class AccessService {
                 item.collectionId === collection.id &&
                 item.sharedWithUserId === member.userId
             );
+            const group = viaGroups.get(collection.id)?.get(member.userId) || null;
+            const options = [share?.permission, collection.companyShare, group];
             const permission =
               role !== "member"
                 ? "edit"
-                : share?.permission || collection.companyShare || null;
+                : options.includes("edit")
+                  ? "edit"
+                  : options.includes("view")
+                    ? "view"
+                    : null;
             if (!permission) continue;
             add(member.userId, {
               type: "company",
@@ -173,7 +185,8 @@ class AccessService {
               collectionName: collectionLabel(collection),
               permission,
               role,
-              everyone: role === "member" && !share && !!collection.companyShare,
+              everyone: role === "member" && !share && !group && !!collection.companyShare,
+              group: role === "member" && !share && !!group,
             });
           }
         }

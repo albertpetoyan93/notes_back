@@ -7,6 +7,7 @@ import { formatCompanyName } from "../util/formatCompanyName";
 import CompanyBilling from "./CompanyBilling";
 import CompanyPolicyService from "./CompanyPolicyService";
 import EmailService from "./EmailService";
+import GroupService from "./GroupService";
 import StripeService from "./StripeService";
 
 const INVITE_MS = 14 * 24 * 60 * 60 * 1000;
@@ -290,6 +291,7 @@ class CompanyService {
       throw Object.assign(new Error("Only the owner can remove an admin"), { status: 403 });
     }
     await member.destroy();
+    if (member.userId) await GroupService.leaveCompany(companyId, member.userId);
     // A removed member's seat stops being billed at the next renewal.
     if (member.status === "active") StripeService.syncSeatsLater(companyId);
     return { ok: true };

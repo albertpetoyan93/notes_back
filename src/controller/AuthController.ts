@@ -12,7 +12,8 @@ import logger from "jet-logger";
 import AuditService from "@src/services/AuditService";
 import CompanyPolicyService from "@src/services/CompanyPolicyService";
 import E2EAccountService, { E2EError, e2eDeadline } from "@src/services/E2EAccountService";
-import { isAdminEmail } from "@src/services/DiscountService";
+import { parseExtensionVersion } from "@src/services/admin/extensionVersion";
+import SignupSourceService from "@src/services/SignupSourceService";
 
 export function publicUser(user: {
   id: number;
@@ -31,7 +32,12 @@ export function publicUser(user: {
 }
 
 export function sessionMeta(req: Request): SessionMeta {
-  return { userAgent: req.get("user-agent"), ip: req.ip };
+  const extensionVersion = parseExtensionVersion(req.get("x-keevo-extension-version"));
+  return {
+    userAgent: req.get("user-agent"),
+    ip: req.ip,
+    ...(extensionVersion ? { extensionVersion } : {}),
+  };
 }
 
 function notifyTwoFactorChanged(user: User, enabled: boolean) {
@@ -117,6 +123,9 @@ export default class AuthController {
         fullName,
         e2e: keys,
       });
+
+      // Where this account came from (website UTM tags, or the extension). Never fails sign-up.
+      await SignupSourceService.capture(user.id, req.body.signupSource, Boolean(req.get("x-keevo-extension-version")));
 
       const session = await AuthService.issueSession(user, sessionMeta(req));
       setAuthCookies(res, session.accessToken, session.refreshToken);
@@ -600,8 +609,6 @@ export default class AuthController {
         autoLockMinutes: CompanyPolicyService.effectiveAutoLock(user.autoLockMinutes ?? 15, rules),
         autoLockLimit: rules.maxIdleMinutes,
         locked: Boolean((req.user as { locked?: boolean } | undefined)?.locked),
-        // 2keevo's own admins see the admin view (ADMIN_EMAILS).
-        ...(isAdminEmail(user.email) ? { isAdmin: true } : {}),
         // Accounts without end-to-end encryption must turn it on by then (E2E_DEADLINE).
         ...(!user.e2eEnabled && e2eDeadline() ? { e2eDeadline: e2eDeadline() } : {}),
       });

@@ -3,6 +3,8 @@ import { PLANS, RENEWAL_REMINDER_DAYS, TRIAL_REMINDER_DAYS } from "../common/pla
 import Subscription from "../models/Subscription";
 import CompanyBilling, { recipient } from "./CompanyBilling";
 import EmailService from "./EmailService";
+import AttachmentService from "./AttachmentService";
+import EmergencyAccessService from "./EmergencyAccessService";
 import JobService from "./JobService";
 import StripeService from "./StripeService";
 
@@ -99,4 +101,8 @@ export function registerBillingJobs() {
   JobService.register("billing:removal-warnings", () => CompanyBilling.removalWarnings());
   JobService.register("billing:renewal-reminders", () => remindRenewals());
   JobService.register("billing:team-seats", () => StripeService.reconcileSeats());
+  // Not billing, but the same daily runner: emergency access requests whose wait ended, and reminders.
+  JobService.register("emergency:requests", () => EmergencyAccessService.dailyJob());
+  // Files of items deleted for good, and uploads that never finished.
+  JobService.register("attachments:cleanup", () => AttachmentService.cleanup());
 }

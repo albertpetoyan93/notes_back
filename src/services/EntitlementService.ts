@@ -47,6 +47,7 @@ export const planLimitBody = (error: PlanLimitError) => ({
  * - active: yes
  * - payment failed: during the grace period
  * - cancelled: until the end of the period already paid for
+ * Keep in step with the SQL copy (`LIVE`) in services/admin/AdminUsersService.ts.
  */
 export function isLive(subscription: Subscription, now = new Date()) {
   const after = (date?: Date | null) => !!date && new Date(date).getTime() > now.getTime();
@@ -64,10 +65,23 @@ export function isLive(subscription: Subscription, now = new Date()) {
   }
 }
 
-const best = (subscriptions: Subscription[], now: Date) =>
+export const best = (subscriptions: Subscription[], now: Date) =>
   subscriptions
     .filter((subscription) => isLive(subscription, now))
     .sort((a, b) => PLANS[b.plan].rank - PLANS[a.plan].rank)[0] || null;
+
+/** Which source wins for a person, given the best live subscription from each. Also used by the admin users list. */
+export function decidePlan(
+  own: Subscription | null,
+  family: Subscription | null,
+  familyMembership: { ownerId: number } | null,
+  team: Subscription | null
+): Entitlement["source"] {
+  if (own && (!team || PLANS[own.plan].rank >= PLANS[team.plan].rank) && (!family || own.plan === "family")) return "own";
+  if (family && familyMembership) return "family";
+  if (team) return "team";
+  return "free";
+}
 
 const FREE = (): Entitlement => ({
   plan: "free",
@@ -116,10 +130,11 @@ class EntitlementService {
         )
       : null;
 
-    if (own && (!team || PLANS[own.plan].rank >= PLANS[team.plan].rank) && (!family || own.plan === "family")) {
+    const source = decidePlan(own, family, membership, team);
+    if (source === "own" && own) {
       return { plan: own.plan, source: "own", limits: PLANS[own.plan].limits, subscription: own };
     }
-    if (family && membership) {
+    if (source === "family" && family && membership) {
       return {
         plan: "family",
         source: "family",
@@ -128,7 +143,7 @@ class EntitlementService {
         subscription: family,
       };
     }
-    if (team) {
+    if (source === "team" && team) {
       return {
         plan: "team",
         source: "team",

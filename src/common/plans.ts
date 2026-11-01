@@ -17,6 +17,10 @@ export interface PlanLimits {
   shareExpiry: boolean;
   /** Weak, reused and old password report. */
   passwordHealth: boolean;
+  /** Trusted contacts who can ask for access to the personal vault. */
+  emergencyAccess: boolean;
+  /** File attachments, in bytes: per person, or per member for a company's collections. */
+  storageBytes: number;
 }
 
 export interface Plan {
@@ -27,11 +31,16 @@ export interface Plan {
   limits: PlanLimits;
 }
 
+const MB = 1024 * 1024;
+const GB = 1024 * MB;
+
 const UNLIMITED: PlanLimits = {
   collections: null,
   sharePeople: null,
   shareExpiry: true,
   passwordHealth: true,
+  emergencyAccess: true,
+  storageBytes: GB,
 };
 
 export const PLANS: Record<PlanId, Plan> = {
@@ -39,7 +48,7 @@ export const PLANS: Record<PlanId, Plan> = {
     id: "free",
     name: "Free",
     rank: 0,
-    limits: { collections: 2, sharePeople: 3, shareExpiry: false, passwordHealth: false },
+    limits: { collections: 2, sharePeople: 3, shareExpiry: false, passwordHealth: false, emergencyAccess: false, storageBytes: 50 * MB },
   },
   premium: { id: "premium", name: "Premium", rank: 1, limits: UNLIMITED },
   // Team gives every member Premium; it ranks with Premium for the personal vault.
@@ -56,6 +65,13 @@ export const TRIAL_PLANS: PlanId[] = ["premium", "family", "team"];
 
 /** People an organizer can invite into Family (6 with the organizer). */
 export const FAMILY_MAX_MEMBERS = 5;
+
+/** One attachment can be up to this big (before encryption). */
+export const MAX_ATTACHMENT_BYTES = 100 * 1024 * 1024;
+
+/** Emergency access: trusted contacts per person, and the waiting times to choose from. */
+export const EMERGENCY_MAX_CONTACTS = 5;
+export const EMERGENCY_WAIT_DAYS = [1, 2, 7, 14, 30];
 
 /** Failed payment: days of grace before a personal plan ends or a company is suspended. */
 export const GRACE_DAYS = 14;

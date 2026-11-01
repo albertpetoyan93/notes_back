@@ -2,6 +2,7 @@ import { Router, RequestHandler } from "express";
 import isAuth from "../middlwares/isAuth";
 import CompanyController from "../controller/CompanyController";
 import CompanyRecoveryController from "../controller/CompanyRecoveryController";
+import GroupController from "../controller/GroupController";
 
 const router = Router();
 
@@ -30,6 +31,19 @@ router.delete(
   "/:id/collections/:collectionId/share",
   CompanyController.unshareCollection as RequestHandler
 );
+// Groups: owners and admins manage them; members see them and can ask to join.
+router.get("/:id/groups", GroupController.list as RequestHandler);
+router.post("/:id/groups", GroupController.create as RequestHandler);
+router.put("/:id/groups/:groupId", GroupController.rename as RequestHandler);
+router.delete("/:id/groups/:groupId", GroupController.remove as RequestHandler);
+router.post("/:id/groups/:groupId/members", GroupController.addMembers as RequestHandler);
+router.delete("/:id/groups/:groupId/members/:userId", GroupController.removeMember as RequestHandler);
+router.post("/:id/groups/:groupId/request", GroupController.request as RequestHandler);
+router.delete("/:id/groups/:groupId/request", GroupController.cancelRequest as RequestHandler);
+router.post("/:id/group-requests/:requestId/approve", GroupController.decide(true) as RequestHandler);
+router.post("/:id/group-requests/:requestId/decline", GroupController.decide(false) as RequestHandler);
+router.post("/:id/collections/:collectionId/groups", GroupController.shareCollection as RequestHandler);
+router.delete("/:id/collections/:collectionId/groups/:groupId", GroupController.unshareCollection as RequestHandler);
 // The owner can always take the company's items out (also while suspended).
 router.get("/:id/export", CompanyController.exportItems as RequestHandler);
 router.get("/:id/members", CompanyController.members as RequestHandler);
