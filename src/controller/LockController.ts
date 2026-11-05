@@ -123,29 +123,57 @@ export default class LockController {
     }
   };
 
-  /** Change how long the vault may sit idle before it locks. */
+  /** Change how long the vault app and/or the extension may sit idle before they lock. */
   static settings = async (req: LockRequest, res: Response, next: NextFunction) => {
     try {
-      const minutes = Number(req.body?.autoLockMinutes);
-      if (!AUTO_LOCK_CHOICES.includes(minutes)) {
+      const hasVault = Object.prototype.hasOwnProperty.call(req.body || {}, "autoLockMinutes");
+      const hasExtension = Object.prototype.hasOwnProperty.call(
+        req.body || {},
+        "extensionAutoLockMinutes"
+      );
+      if (!hasVault && !hasExtension) {
+        res.status(HttpStatusCodes.BAD_REQUEST).send({
+          message: "Send autoLockMinutes and/or extensionAutoLockMinutes.",
+        });
+        return;
+      }
+
+      const vaultMinutes = hasVault ? Number(req.body.autoLockMinutes) : undefined;
+      const extensionMinutes = hasExtension ? Number(req.body.extensionAutoLockMinutes) : undefined;
+      const invalid =
+        (hasVault && !AUTO_LOCK_CHOICES.includes(vaultMinutes as number)) ||
+        (hasExtension && !AUTO_LOCK_CHOICES.includes(extensionMinutes as number));
+      if (invalid) {
         res.status(HttpStatusCodes.BAD_REQUEST).send({
           message: `Choose one of: ${AUTO_LOCK_CHOICES.join(", ")} minutes (0 = never).`,
         });
         return;
       }
+
       const user = req.user?.id ? await User.findByPk(req.user.id) : null;
       if (!user) {
         res.status(HttpStatusCodes.UNAUTHORIZED).send({ message: "Sign in again" });
         return;
       }
-      await user.update({ autoLockMinutes: minutes });
+
+      const patch: { autoLockMinutes?: number; extensionAutoLockMinutes?: number } = {};
+      if (hasVault) patch.autoLockMinutes = vaultMinutes;
+      if (hasExtension) patch.extensionAutoLockMinutes = extensionMinutes;
+      await user.update(patch);
+
       await AuditService.record({
         actorId: user.id,
         action: "auto_lock_changed",
-        details: { minutes },
+        details: {
+          ...(hasVault ? { minutes: vaultMinutes } : {}),
+          ...(hasExtension ? { extensionMinutes } : {}),
+        },
         req,
       });
-      res.status(HttpStatusCodes.OK).send({ autoLockMinutes: minutes });
+      res.status(HttpStatusCodes.OK).send({
+        autoLockMinutes: user.autoLockMinutes,
+        extensionAutoLockMinutes: user.extensionAutoLockMinutes,
+      });
     } catch (e) {
       next(e);
     }

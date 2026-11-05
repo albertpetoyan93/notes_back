@@ -607,6 +607,10 @@ export default class AuthController {
       res.status(HttpStatusCodes.OK).send({
         ...user.toJSON(),
         autoLockMinutes: CompanyPolicyService.effectiveAutoLock(user.autoLockMinutes ?? 15, rules),
+        extensionAutoLockMinutes: CompanyPolicyService.effectiveAutoLock(
+          user.extensionAutoLockMinutes ?? 60,
+          rules
+        ),
         autoLockLimit: rules.maxIdleMinutes,
         locked: Boolean((req.user as { locked?: boolean } | undefined)?.locked),
         // Accounts without end-to-end encryption must turn it on by then (E2E_DEADLINE).

@@ -16,8 +16,10 @@ interface UserAttributes {
   twoFactorSecret?: string | null;
   twoFactorRecoveryCodes?: string[] | null;
   twoFactorLastStep?: number | null;
-  /** Lock the vault after this many idle minutes; 0 = never. */
+  /** Lock the vault app after this many idle minutes; 0 = never. */
   autoLockMinutes?: number;
+  /** Lock the browser extension after this many idle minutes; 0 = never. */
+  extensionAutoLockMinutes?: number;
   // End-to-end encryption (E2E_DESIGN.md). All key values are locked (wrapped).
   e2eEnabled?: boolean;
   e2eSince?: Date | null;
@@ -50,6 +52,7 @@ interface UserCreationAttributes
     | "twoFactorRecoveryCodes"
     | "twoFactorLastStep"
     | "autoLockMinutes"
+    | "extensionAutoLockMinutes"
     | "e2eEnabled"
     | "e2eSince"
     | "mustChangeMasterPassword"
@@ -83,6 +86,7 @@ class User
   public twoFactorRecoveryCodes?: string[] | null;
   public twoFactorLastStep?: number | null;
   public autoLockMinutes!: number;
+  public extensionAutoLockMinutes!: number;
   public e2eEnabled!: boolean;
   public e2eSince?: Date | null;
   public mustChangeMasterPassword!: boolean;
@@ -156,6 +160,11 @@ User.init(
       type: DataTypes.INTEGER,
       allowNull: false,
       defaultValue: 15,
+    },
+    extensionAutoLockMinutes: {
+      type: DataTypes.INTEGER,
+      allowNull: false,
+      defaultValue: 60,
     },
     e2eEnabled: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
     e2eSince: { type: DataTypes.DATE, allowNull: true },
