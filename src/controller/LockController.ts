@@ -3,7 +3,10 @@ import HttpStatusCodes from "../common/HttpStatusCodes";
 import User from "../models/User";
 import AuditService from "../services/AuditService";
 import PasskeyService, { PasskeyError } from "../services/PasskeyService";
-import SessionService, { AUTO_LOCK_CHOICES } from "../services/SessionService";
+import SessionService, {
+  AUTO_LOCK_CHOICES,
+  EXTENSION_AUTO_LOCK_CHOICES,
+} from "../services/SessionService";
 import E2EAccountService from "../services/E2EAccountService";
 
 type LockRequest = Request & {
@@ -142,10 +145,12 @@ export default class LockController {
       const extensionMinutes = hasExtension ? Number(req.body.extensionAutoLockMinutes) : undefined;
       const invalid =
         (hasVault && !AUTO_LOCK_CHOICES.includes(vaultMinutes as number)) ||
-        (hasExtension && !AUTO_LOCK_CHOICES.includes(extensionMinutes as number));
+        (hasExtension && !EXTENSION_AUTO_LOCK_CHOICES.includes(extensionMinutes as number));
       if (invalid) {
+        const choices =
+          hasExtension && !hasVault ? EXTENSION_AUTO_LOCK_CHOICES : AUTO_LOCK_CHOICES;
         res.status(HttpStatusCodes.BAD_REQUEST).send({
-          message: `Choose one of: ${AUTO_LOCK_CHOICES.join(", ")} minutes (0 = never).`,
+          message: `Choose one of: ${choices.join(", ")} minutes (0 = never).`,
         });
         return;
       }
