@@ -31,6 +31,8 @@ interface NoteAttributes {
   encData?: string | null;
   userId: number;
   collectionId?: number | null;
+  /** Owning company of a work item; null for personal items. */
+  companyId?: number | null;
   deletedAt?: Date | null;
   createdAt?: Date;
   updatedAt?: Date;
@@ -49,6 +51,7 @@ interface NoteCreationAttributes
     | "itemKey"
     | "encData"
     | "collectionId"
+    | "companyId"
     | "deletedAt"
     | "createdAt"
     | "updatedAt"
@@ -81,6 +84,7 @@ class Note
   public encData?: string | null;
   public userId!: number;
   public collectionId?: number | null;
+  public companyId?: number | null;
   public deletedAt?: Date | null;
   public readonly createdAt!: Date;
   public readonly updatedAt!: Date;
@@ -149,6 +153,7 @@ Note.init(
       type: DataTypes.INTEGER,
       allowNull: true,
     },
+    companyId: { type: DataTypes.INTEGER, allowNull: true },
     deletedAt: {
       type: DataTypes.DATE,
       allowNull: true,

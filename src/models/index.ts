@@ -33,6 +33,8 @@ import UserActivityDay from "./UserActivityDay";
 import SupportRequest from "./SupportRequest";
 import MetricsDaily from "./MetricsDaily";
 import SignupSource from "./SignupSource";
+import CompanyOffboarding from "./CompanyOffboarding";
+import OffboardingTask from "./OffboardingTask";
 import { CompanyGroup, CompanyGroupMember, CollectionGroupShare, GroupRequest } from "./CompanyGroup";
 
 // Define all associations here to avoid circular dependencies
@@ -284,6 +286,16 @@ function setupAssociations() {
   UserActivityDay.belongsTo(User, { as: "user", foreignKey: "userId", onDelete: "CASCADE" });
   SignupSource.belongsTo(User, { as: "user", foreignKey: "userId", onDelete: "CASCADE" });
   SupportRequest.belongsTo(User, { as: "user", foreignKey: "userId", onDelete: "CASCADE" });
+
+  Company.hasMany(Note, { as: "workItems", foreignKey: "companyId", onDelete: "RESTRICT" });
+  Note.belongsTo(Company, { as: "company", foreignKey: "companyId", onDelete: "RESTRICT" });
+  Company.hasMany(CompanyOffboarding, { as: "offboardings", foreignKey: "companyId", onDelete: "CASCADE" });
+  CompanyOffboarding.belongsTo(Company, { as: "company", foreignKey: "companyId", onDelete: "CASCADE" });
+  CompanyOffboarding.belongsTo(User, { as: "user", foreignKey: "userId", onDelete: "CASCADE" });
+  CompanyOffboarding.belongsTo(User, { as: "starter", foreignKey: "startedBy", constraints: false });
+  CompanyOffboarding.hasMany(OffboardingTask, { as: "tasks", foreignKey: "offboardingId", onDelete: "CASCADE" });
+  OffboardingTask.belongsTo(CompanyOffboarding, { as: "offboarding", foreignKey: "offboardingId", onDelete: "CASCADE" });
+  OffboardingTask.belongsTo(Note, { as: "item", foreignKey: "noteId", constraints: false });
 }
 
 // Export default object with all models
@@ -315,6 +327,8 @@ export default {
   SupportRequest,
   MetricsDaily,
   SignupSource,
+  CompanyOffboarding,
+  OffboardingTask,
   CompanyGroup,
   CompanyGroupMember,
   CollectionGroupShare,

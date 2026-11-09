@@ -2,7 +2,7 @@ import { DataTypes, Model, Optional } from "sequelize";
 import sequelize from "../configs/DB/sequelize";
 
 export type CompanyRole = "owner" | "admin" | "member";
-export type MemberStatus = "invited" | "active" | "removed";
+export type MemberStatus = "invited" | "active" | "suspended" | "removed";
 
 interface CompanyMemberAttributes {
   id: number;
@@ -12,13 +12,14 @@ interface CompanyMemberAttributes {
   role: CompanyRole;
   status: MemberStatus;
   expiresAt?: Date | null;
+  removedAt?: Date | null;
   createdAt?: Date;
   updatedAt?: Date;
 }
 
 type CompanyMemberCreation = Optional<
   CompanyMemberAttributes,
-  "id" | "userId" | "status" | "expiresAt" | "createdAt" | "updatedAt"
+  "id" | "userId" | "status" | "expiresAt" | "removedAt" | "createdAt" | "updatedAt"
 >;
 
 class CompanyMember
@@ -32,6 +33,7 @@ class CompanyMember
   public role!: CompanyRole;
   public status!: MemberStatus;
   public expiresAt?: Date | null;
+  public removedAt?: Date | null;
   public readonly createdAt!: Date;
   public readonly updatedAt!: Date;
 }
@@ -60,11 +62,15 @@ CompanyMember.init(
       allowNull: false,
     },
     status: {
-      type: DataTypes.ENUM("invited", "active", "removed"),
+      type: DataTypes.ENUM("invited", "active", "suspended", "removed"),
       allowNull: false,
       defaultValue: "invited",
     },
     expiresAt: {
+      type: DataTypes.DATE,
+      allowNull: true,
+    },
+    removedAt: {
       type: DataTypes.DATE,
       allowNull: true,
     },
