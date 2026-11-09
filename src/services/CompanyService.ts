@@ -8,6 +8,7 @@ import CompanyBilling from "./CompanyBilling";
 import CompanyPolicyService from "./CompanyPolicyService";
 import EmailService from "./EmailService";
 import GroupService from "./GroupService";
+import OffboardingService from "./OffboardingService";
 import StripeService from "./StripeService";
 
 const INVITE_MS = 14 * 24 * 60 * 60 * 1000;
@@ -17,7 +18,7 @@ export interface CompanySummary {
   name: string;
   status: "active" | "suspended";
   role: "owner" | "admin" | "member";
-  memberStatus: "invited" | "active" | "removed";
+  memberStatus: "invited" | "active" | "suspended" | "removed";
   expiresAt: string | null;
   /** The company's rules, so the vault can explain them (e.g. password length). */
   policies: CompanyPolicies;
@@ -145,6 +146,8 @@ class CompanyService {
         companyId,
         [Op.or]: [
           { status: "active" },
+          // Being offboarded: managers need to see who.
+          { status: "suspended" },
           { status: "removed" },
           {
             status: "invited",
@@ -186,6 +189,12 @@ class CompanyService {
     if (existing?.status === "active") {
       throw Object.assign(new Error("That person is already in this company"), {
         status: 400,
+      });
+    }
+    // Re-inviting would bring them back mid-offboarding and leave it unable to finish.
+    if (existing?.status === "suspended") {
+      throw Object.assign(new Error("This person is being offboarded. Finish their offboarding first."), {
+        status: 409,
       });
     }
     if (
@@ -290,10 +299,14 @@ class CompanyService {
     if (actor.role === "admin" && member.role !== "member") {
       throw Object.assign(new Error("Only the owner can remove an admin"), { status: 403 });
     }
+    // Someone who could open company items is suspended and offboarded, not deleted.
+    // A second removal (e.g. two managers at once) gets the open offboarding back.
+    if (member.status === "active" || member.status === "suspended") {
+      const { offboardingId, created } = await OffboardingService.start(companyId, userId, memberId);
+      return { ok: true, offboardingId, created };
+    }
     await member.destroy();
     if (member.userId) await GroupService.leaveCompany(companyId, member.userId);
-    // A removed member's seat stops being billed at the next renewal.
-    if (member.status === "active") StripeService.syncSeatsLater(companyId);
     return { ok: true };
   }
 

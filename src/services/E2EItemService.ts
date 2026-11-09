@@ -1,5 +1,5 @@
 import crypto from "crypto";
-import { Op } from "sequelize";
+import { Op, Transaction } from "sequelize";
 import sequelize from "../configs/DB/sequelize";
 import Collection from "../models/Collection";
 import CollectionKey from "../models/CollectionKey";
@@ -49,7 +49,8 @@ const CATEGORIES = ["note", "password", "login", "command", "ssh", "db", "addres
 
 export interface SealedItem {
   e2eId: string;
-  itemKey: string;
+  /** The creator's copy; a company item has none. */
+  itemKey: string | null;
   encData: string;
 }
 
@@ -102,10 +103,12 @@ export function assertEncData(value: unknown, name = "encrypted data"): string {
   return text;
 }
 
-export function assertSealed(input: any): SealedItem {
+export function assertSealed(input: any, options: { work?: boolean } = {}): SealedItem {
   const e2eId = String(input?.e2eId || "");
   const itemKey = String(input?.itemKey || "");
   if (!E2E_ID.test(e2eId)) throw httpError("Bad item id.", 400);
+  // A company item's key goes only to its collections.
+  if (options.work) return { e2eId, itemKey: null, encData: assertEncData(input?.encData) };
   if (!ITEM_KEY.test(itemKey)) throw httpError("Bad item key.", 400);
   return { e2eId, itemKey, encData: assertEncData(input?.encData) };
 }
@@ -281,6 +284,16 @@ class E2EItemService {
     return map;
   }
 
+  /** Which of these collections belong to a company. */
+  private async companyCollectionIds(collectionIds: number[]) {
+    if (!collectionIds.length) return new Set<number>();
+    const rows = await Collection.findAll({
+      where: { id: { [Op.in]: collectionIds }, companyId: { [Op.not]: null } },
+      attributes: ["id"],
+    });
+    return new Set(rows.map((row) => row.id));
+  }
+
   private async shareRecipients(noteIds: number[]) {
     const map = new Map<number, Set<number>>();
     if (!noteIds.length) return map;
@@ -303,7 +316,7 @@ class E2EItemService {
    */
   async plan(
     callerId: number,
-    notes: Pick<Note, "id" | "userId" | "e2eId">[],
+    notes: (Pick<Note, "id" | "userId" | "e2eId"> & Partial<Pick<Note, "companyId">>)[],
     options: PlanOptions = {}
   ) {
     const needs = emptyNeeds();
@@ -387,7 +400,8 @@ class E2EItemService {
         needs.items.push({ noteId: note.id, e2eId: String(note.e2eId), collectionId, keyVersion: collection.e2eKeyVersion });
       }
       for (const userId of sharesOf(note.id)) {
-        if (userId === note.userId) continue;
+        // A personal item's owner has their own copy; a work item's creator doesn't.
+        if (userId === note.userId && note.companyId == null) continue;
         const publicKey = keyOfUser.get(userId);
         if (!publicKey) {
           blocked.add(note.id);
@@ -420,7 +434,7 @@ class E2EItemService {
     const notes = noteIds.length
       ? await Note.findAll({
           where: { id: { [Op.in]: [...new Set(noteIds)] }, e2e: true },
-          attributes: ["id", "userId", "e2eId"],
+          attributes: ["id", "userId", "companyId", "e2eId"],
           paranoid: false,
         })
       : [];
@@ -499,7 +513,12 @@ class E2EItemService {
         const collectionId = Number(entry?.collectionId);
         const keyVersion = Number(entry?.keyVersion);
         const wrappedKey = assertKey(entry?.wrappedKey, ITEM_KEY, "item key");
-        const note = await Note.findOne({ where: { id: noteId, e2e: true }, attributes: ["id", "userId"], paranoid: false, transaction });
+        const note = await Note.findOne({
+          where: { id: noteId, e2e: true },
+          attributes: ["id", "userId", "companyId"],
+          paranoid: false,
+          transaction,
+        });
         const collection = await Collection.findByPk(collectionId, { attributes: ["id", "e2eKeyVersion"], transaction });
         const people = members.get(collectionId) || [];
         const inCollection =
@@ -510,7 +529,8 @@ class E2EItemService {
           !collection ||
           collection.e2eKeyVersion !== keyVersion ||
           !inCollection ||
-          !(note.userId === callerId || people.some((member) => member.userId === callerId))
+          // A work item's creator needs access to the collection like anyone else.
+          !((note.companyId == null && note.userId === callerId) || people.some((member) => member.userId === callerId))
         ) {
           throw httpError("An item key doesn't fit its collection. Try again.", 409);
         }
@@ -532,12 +552,31 @@ class E2EItemService {
         const noteId = Number(entry?.noteId);
         const userId = Number(entry?.userId);
         const wrappedKey = assertKey(entry?.wrappedKey, SEALED_KEY, "shared key");
-        const note = await Note.findOne({ where: { id: noteId, e2e: true }, attributes: ["id", "userId"], paranoid: false, transaction });
-        if (!note || note.userId !== callerId) throw httpError("Only the owner shares an item.", 403);
+        const note = await Note.findOne({
+          where: { id: noteId, e2e: true },
+          attributes: ["id", "userId", "companyId"],
+          paranoid: false,
+          transaction,
+        });
+        // A work item is shared by whoever can manage it (edit access), not by whoever made it.
+        if (note?.companyId != null) {
+          if (!(await this.canManageWorkItem(noteId, callerId))) {
+            throw httpError("Only people who can edit this item can share it.", 403);
+          }
+        } else if (!note || note.userId !== callerId) {
+          throw httpError("Only the owner shares an item.", 403);
+        }
         await ItemKey.destroy({ where: { noteId, containerType: "user", containerId: userId }, transaction });
         await ItemKey.create({ noteId, containerType: "user", containerId: userId, wrappedKey }, { transaction });
       }
     });
+  }
+
+  private async canManageWorkItem(noteId: number, userId: number) {
+    // Loaded here: NoteService depends on this service.
+    const { default: NoteService, canManage } = await import("./NoteService");
+    const access = await NoteService.getNoteAccess(noteId, userId);
+    return !!access && canManage(access, userId);
   }
 
   /**
@@ -554,7 +593,7 @@ class E2EItemService {
     const sealedNotes = noteIds.length
       ? await Note.findAll({
           where: { id: { [Op.in]: noteIds }, e2e: true },
-          attributes: ["id", "userId", "e2eId"],
+          attributes: ["id", "userId", "companyId", "e2eId"],
           paranoid: false,
         })
       : [];
@@ -596,7 +635,13 @@ class E2EItemService {
    * copies it needs, sent without a note id (it has none yet). Returns the
    * item keys to store once the item exists.
    */
-  async ensureNew(callerId: number, e2eId: string, collectionIds: number[], e2eKeys: any) {
+  async ensureNew(
+    callerId: number,
+    e2eId: string,
+    collectionIds: number[],
+    e2eKeys: any,
+    options: { work?: boolean } = {}
+  ) {
     const input = e2eKeys || {};
     if (Array.isArray(input.collections) && input.collections.length) {
       await this.applyKeys(callerId, { collections: input.collections });
@@ -622,25 +667,61 @@ class E2EItemService {
         shares: [],
       });
     }
-    return sent.filter((item: any) => needs.items.some((need) => need.collectionId === item.collectionId));
+    const keys = sent.filter((item: any) => needs.items.some((need) => need.collectionId === item.collectionId));
+    // A company item has no creator copy: without one per collection nobody could open it.
+    if (options.work && !collectionIds.every((id) => keys.some((key: any) => key.collectionId === id))) {
+      throw httpError("A key for one of the collections is missing. Try again.", 409);
+    }
+    return keys;
+  }
+
+  /** Whether each of these collections holds a copy of the item's key at its current key version. */
+  async coversCollections(noteId: number, collectionIds: number[], transaction?: Transaction) {
+    if (!collectionIds.length) return false;
+    const collections = await Collection.findAll({
+      where: { id: { [Op.in]: collectionIds } },
+      attributes: ["id", "e2eKeyVersion"],
+      transaction,
+    });
+    const copies = await ItemKey.findAll({
+      where: { noteId, containerType: "collection", containerId: { [Op.in]: collectionIds } },
+      attributes: ["containerId", "keyVersion"],
+      transaction,
+    });
+    return collectionIds.every((id) => {
+      const version = collections.find((item) => item.id === id)?.e2eKeyVersion;
+      return version != null && copies.some((row) => row.containerId === id && row.keyVersion === version);
+    });
   }
 
   /** After the new item exists: store its collection key copies. */
-  async storeNewItemKeys(noteId: number, keys: { collectionId: number; keyVersion: number; wrappedKey: string }[]) {
+  async storeNewItemKeys(
+    noteId: number,
+    keys: { collectionId: number; keyVersion: number; wrappedKey: string }[],
+    transaction?: Transaction
+  ) {
     for (const key of keys) {
-      await ItemKey.create({
-        noteId,
-        containerType: "collection",
-        containerId: key.collectionId,
-        keyVersion: key.keyVersion,
-        wrappedKey: key.wrappedKey,
-      });
+      await ItemKey.create(
+        {
+          noteId,
+          containerType: "collection",
+          containerId: key.collectionId,
+          keyVersion: key.keyVersion,
+          wrappedKey: key.wrappedKey,
+        },
+        { transaction }
+      );
     }
   }
 
   /** A way in was removed: its key copy goes too. */
-  async dropItemKey(noteId: number, containerType: "user" | "collection", containerId: number) {
-    await ItemKey.destroy({ where: { noteId, containerType, containerId } });
+  async dropItemKey(
+    noteId: number,
+    containerType: "user" | "collection",
+    containerId: number,
+    transaction?: Transaction
+  ) {
+    await ItemKey.destroy({ where: { noteId, containerType, containerId }, transaction });
   }
 
   /** The collection is gone: so are its key copies. */
@@ -711,11 +792,26 @@ class E2EItemService {
    * its shared collections isn't encrypted yet.
    */
   async pending(userId: number) {
-    const candidates = await Note.findAll({
+    // Loaded here: NoteService depends on this service.
+    const { default: NoteService } = await import("./NoteService");
+    const own = await Note.findAll({
       where: { userId, e2e: false },
       order: [["id", "ASC"]],
       paranoid: false,
     });
+    const ownLinks = await this.linkedCollectionIds(own.map((note) => note.id));
+    const companyCollections = await this.companyCollectionIds([...new Set([...ownLinks.values()].flatMap((set) => [...set]))]);
+    // Work items move by current access (edit through the company), never because you made them.
+    const workIds = await NoteService.manageableWorkItemIds(userId);
+    const work = workIds.length
+      ? await Note.findAll({ where: { id: { [Op.in]: workIds }, e2e: false }, order: [["id", "ASC"]] })
+      : [];
+    const candidates = [
+      ...own.filter(
+        (note) => note.companyId == null && ![...(ownLinks.get(note.id) || [])].some((id) => companyCollections.has(id))
+      ),
+      ...work,
+    ].sort((a, b) => a.id - b.id);
     const items = [];
     let remaining = 0;
     // Planned as if already end-to-end (a stand-in id for the item key), many
@@ -726,7 +822,7 @@ class E2EItemService {
       const chunk = readable.slice(start, start + 500);
       const { needs, blocked } = await this.plan(
         userId,
-        chunk.map((note) => ({ id: note.id, userId: note.userId, e2eId: "" }) as Note)
+        chunk.map((note) => ({ id: note.id, userId: note.userId, companyId: note.companyId, e2eId: "" }) as Note)
       );
       const created = new Set(needs.collections.filter((entry) => entry.create).map((entry) => entry.collectionId));
       for (const note of chunk) {
@@ -776,10 +872,18 @@ class E2EItemService {
     const list = Array.isArray(input) ? input.slice(0, BATCH) : [];
     let moved = 0;
     const skipped: number[] = [];
+    // Loaded here: NoteService depends on this service.
+    const { default: NoteService } = await import("./NoteService");
     for (const raw of list as any[]) {
       const noteId = Number(raw?.id);
       try {
-        const sealed = assertSealed(raw);
+        // A work item moves for whoever can manage it now; it has no creator key copy.
+        const manage = await NoteService.manageAccess(noteId, userId);
+        if (!manage) {
+          skipped.push(noteId);
+          continue;
+        }
+        const sealed = assertSealed(raw, { work: manage.work });
         const versions = Array.isArray(raw?.versions) ? raw.versions : [];
         const shareKeys = (Array.isArray(raw?.shares) ? raw.shares : []).map((entry: any) => ({
           userId: Number(entry?.userId),
@@ -792,7 +896,7 @@ class E2EItemService {
         }));
         const done = await sequelize.transaction(async (transaction) => {
           const note = await Note.findOne({
-            where: { id: noteId, userId },
+            where: { id: noteId },
             paranoid: false,
             transaction,
             lock: transaction.LOCK.UPDATE,
@@ -803,7 +907,9 @@ class E2EItemService {
           const readAt = new Date(raw?.updatedAt).getTime();
           if (!Number.isFinite(readAt) || new Date(note.updatedAt).getTime() !== readAt) return false;
           // Every way in must be covered by what the browser sent.
-          const { needs, blocked } = await this.plan(userId, [{ id: note.id, userId: note.userId, e2eId: "" } as Note]);
+          const { needs, blocked } = await this.plan(userId, [
+            { id: note.id, userId: note.userId, companyId: note.companyId, e2eId: "" } as Note,
+          ]);
           if (blocked.size || needs.collections.some((entry) => entry.create)) return false;
           const coversShares = needs.shares.every((need) => shareKeys.some((key: any) => key.userId === need.userId));
           const coversCollections = needs.items.every((need) =>
@@ -1162,6 +1268,16 @@ class E2EItemService {
           : {};
       await collection.update({ e2eKeyVersion: keyVersion, ...renamed }, { transaction });
     });
+    // This replacement may have dropped the last key copy holding an offboarding open.
+    try {
+      const rotated = await Collection.findByPk(collectionId, { attributes: ["companyId"] });
+      if (rotated?.companyId) {
+        const { default: OffboardingService } = await import("./OffboardingService");
+        await OffboardingService.completeOpenFor(rotated.companyId, userId);
+      }
+    } catch (error) {
+      console.error("Error completing offboardings:", error);
+    }
     return { rotated: true };
   }
 }

@@ -3,6 +3,7 @@ import NoteService from "../services/NoteService";
 import CompanyService from "../services/CompanyService";
 import AuditService from "../services/AuditService";
 import CompanyMember from "../models/CompanyMember";
+import OffboardingService from "../services/OffboardingService";
 import CollectionService from "../services/CollectionService";
 import CompanyPolicyService, { PolicyError } from "../services/CompanyPolicyService";
 
@@ -149,14 +150,17 @@ export default class CompanyController {
       }
       const member = await CompanyMember.findByPk(memberId);
       const result = await CompanyService.removeMember(companyId, userId, memberId);
-      await AuditService.record({
-        actorId: userId,
-        action: "member_removed",
-        companyId,
-        targetUserId: member?.userId ?? null,
-        details: { email: member?.email, role: member?.role },
-        req,
-      });
+      // A repeat removal of someone already being offboarded isn't a second removal.
+      if (!("created" in result) || result.created) {
+        await AuditService.record({
+          actorId: userId,
+          action: "member_removed",
+          companyId,
+          targetUserId: member?.userId ?? null,
+          details: { email: member?.email, role: member?.role },
+          req,
+        });
+      }
       res.json(result);
     } catch (error: any) {
       res.status(error.status || 500).json({
@@ -392,4 +396,38 @@ export default class CompanyController {
       res.status(500).json({ message: "Error loading member access" });
     }
   };
+
+  private static offboardingHandler(fallback: string, run: (req: any) => Promise<unknown>) {
+    return async (req: any, res: Response) => {
+      try {
+        if (!req.user?.id) return res.status(401).json({ message: "Unauthorized" });
+        if (isNaN(parseInt(req.params.id)) || isNaN(parseInt(req.params.oid ?? "0"))) {
+          return res.status(400).json({ message: "Invalid id" });
+        }
+        res.json(await run(req));
+      } catch (error: any) {
+        if (error?.status) return res.status(error.status).json({ message: error.message });
+        console.error(`${fallback}:`, error);
+        res.status(500).json({ message: fallback });
+      }
+    };
+  }
+
+  static offboardings = CompanyController.offboardingHandler("Error loading offboardings", (req) =>
+    OffboardingService.list(parseInt(req.params.id), req.user.id)
+  );
+
+  static offboarding = CompanyController.offboardingHandler("Error loading the offboarding", (req) =>
+    OffboardingService.detail(
+      parseInt(req.params.id),
+      req.user.id,
+      parseInt(req.params.oid),
+      req.query.status ? String(req.query.status) : undefined,
+      parseInt(String(req.query.page)) || 1
+    )
+  );
+
+  static updateOffboardingTasks = CompanyController.offboardingHandler("Error updating tasks", (req) =>
+    OffboardingService.updateTasks(parseInt(req.params.id), req.user.id, parseInt(req.params.oid), req.body || {})
+  );
 }

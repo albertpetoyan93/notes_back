@@ -44,6 +44,7 @@ export const AUDIT_ACTIONS = [
   "item_trashed",
   "item_restored",
   "item_moved",
+  "item_moved_to_company",
   "item_version_viewed",
   "item_version_restored",
   "attachment_added",
@@ -80,6 +81,9 @@ export const AUDIT_ACTIONS = [
   "group_join_requested",
   "group_request_approved",
   "group_request_declined",
+  "offboarding_started",
+  "offboarding_completed",
+  "offboarding_task_updated",
   // Billing
   "trial_started",
   "family_invited",
@@ -146,16 +150,17 @@ export const ACCOUNT_ACTIONS: AuditAction[] = [
   "master_password_reset_by_admin",
   "vault_exported",
   "vault_imported",
+  "item_moved_to_company",
   "secret_link_created",
   "secret_link_revoked",
   "secret_link_opened",
   "support_action",
 ];
 
-/** What staff see in a user's activity: account events, minus secret-link ones (they hint at vault items). */
+/** What staff see in a user's activity: account events, minus secret-link ones and moves into a company (they hint at vault items). */
 export const USER_ACTIVITY_ACTIONS: AuditAction[] = [
   ...new Set<AuditAction>([
-    ...ACCOUNT_ACTIONS.filter((action) => !action.startsWith("secret_link_")),
+    ...ACCOUNT_ACTIONS.filter((action) => !action.startsWith("secret_link_") && action !== "item_moved_to_company"),
     "support_action",
   ]),
 ];
@@ -307,41 +312,8 @@ class AuditService {
    * collections they could open, and which secrets they revealed or copied.
    */
   async memberAccess(companyId: number, managerId: number, memberUserId: number) {
-    if (!(await this.isManager(companyId, managerId))) return null;
-
-    const collections = await Collection.findAll({
-      where: { companyId },
-      attributes: ["id", "name", "encName", "companyShare"],
-      order: [["name", "ASC"]],
-    });
-    const shares = await CollectionShare.findAll({
-      where: {
-        sharedWithUserId: memberUserId,
-        collectionId: { [Op.in]: collections.map((item) => item.id) },
-      },
-      attributes: ["collectionId", "permission"],
-    });
-    const shareByCollection = new Map(
-      shares.map((share) => [share.collectionId, share.permission])
-    );
-    const member = await CompanyMember.findOne({
-      where: { companyId, userId: memberUserId },
-      attributes: ["role"],
-    });
-    const manager = member?.role === "owner" || member?.role === "admin";
-    const viaGroups = await GroupService.forUser(memberUserId, collections.map((item) => item.id));
-    const best = (...values: (string | null | undefined)[]) =>
-      values.includes("edit") ? "edit" : values.includes("view") ? "view" : null;
-    const accessible = collections
-      .map((collection) => ({
-        id: collection.id,
-        // Empty while encrypted: the app fills in the name it can open.
-        name: collection.encName ? "" : collection.name,
-        permission: manager
-          ? "edit"
-          : best(shareByCollection.get(collection.id), collection.companyShare, viaGroups.get(collection.id)),
-      }))
-      .filter((collection) => collection.permission);
+    const accessible = await this.openableCollections(companyId, managerId, memberUserId);
+    if (!accessible) return null;
 
     const touched = await AuditEvent.findAll({
       where: {
@@ -372,6 +344,52 @@ class AuditService {
     }
 
     return { collections: accessible, secretsAccessed: [...byNote.values()] };
+  }
+
+  /**
+   * The company collections a member could open (direct shares, groups,
+   * everyone, or their owner/admin role). Null when the caller isn't a manager.
+   * Read before their groups are left, or the group access is gone.
+   */
+  async openableCollections(companyId: number, managerId: number, memberUserId: number) {
+    if (!(await this.isManager(companyId, managerId))) return null;
+
+    const collections = await Collection.findAll({
+      where: { companyId },
+      attributes: ["id", "name", "encName", "companyShare"],
+      order: [["name", "ASC"]],
+    });
+    const shares = await CollectionShare.findAll({
+      where: {
+        sharedWithUserId: memberUserId,
+        collectionId: { [Op.in]: collections.map((item) => item.id) },
+        // An expired share opens nothing, as on every access path.
+        [Op.or]: [{ expiresAt: null }, { expiresAt: { [Op.gt]: new Date() } }],
+      },
+      attributes: ["collectionId", "permission"],
+    });
+    const shareByCollection = new Map(
+      shares.map((share) => [share.collectionId, share.permission])
+    );
+    const member = await CompanyMember.findOne({
+      where: { companyId, userId: memberUserId },
+      attributes: ["role"],
+    });
+    const manager = member?.role === "owner" || member?.role === "admin";
+    const viaGroups = await GroupService.forUser(memberUserId, collections.map((item) => item.id));
+    const best = (...values: (string | null | undefined)[]) =>
+      values.includes("edit") ? "edit" : values.includes("view") ? "view" : null;
+    const accessible = collections
+      .map((collection) => ({
+        id: collection.id,
+        // Empty while encrypted: the app fills in the name it can open.
+        name: collection.encName ? "" : collection.name,
+        permission: manager
+          ? "edit"
+          : best(shareByCollection.get(collection.id), collection.companyShare, viaGroups.get(collection.id)),
+      }))
+      .filter((collection) => collection.permission);
+    return accessible;
   }
 
   /** `viewerId`: hide IP and browser of events done by anyone else. */

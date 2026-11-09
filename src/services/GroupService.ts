@@ -1,4 +1,4 @@
-import { Op, QueryTypes, UniqueConstraintError } from "sequelize";
+import { Op, QueryTypes, Transaction, UniqueConstraintError } from "sequelize";
 import sequelize from "../configs/DB/sequelize";
 import Collection from "../models/Collection";
 import Company from "../models/Company";
@@ -222,12 +222,14 @@ class GroupService {
   }
 
   /** Gone from the company: out of its groups, and their open requests closed. */
-  async leaveCompany(companyId: number, memberUserId: number) {
-    const ids = (await CompanyGroup.findAll({ where: { companyId }, attributes: ["id"] })).map((group) => group.id);
+  async leaveCompany(companyId: number, memberUserId: number, options: { transaction?: Transaction } = {}) {
+    const { transaction } = options;
+    const ids = (await CompanyGroup.findAll({ where: { companyId }, attributes: ["id"], transaction })).map((group) => group.id);
     if (!ids.length) return;
-    await CompanyGroupMember.destroy({ where: { groupId: { [Op.in]: ids }, userId: memberUserId } });
+    await CompanyGroupMember.destroy({ where: { groupId: { [Op.in]: ids }, userId: memberUserId }, transaction });
     await GroupRequest.update({ status: "declined", decidedAt: new Date() }, {
       where: { groupId: { [Op.in]: ids }, userId: memberUserId, status: "open" },
+      transaction,
     });
   }
 

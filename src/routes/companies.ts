@@ -52,6 +52,9 @@ router.get(
   "/:id/members/:memberId/access",
   CompanyController.memberAccess as RequestHandler
 );
+router.get("/:id/offboardings", CompanyController.offboardings as RequestHandler);
+router.get("/:id/offboardings/:oid", CompanyController.offboarding as RequestHandler);
+router.patch("/:id/offboardings/:oid/tasks", CompanyController.updateOffboardingTasks as RequestHandler);
 router.put("/:id/members/:memberId", CompanyController.updateMember as RequestHandler);
 router.delete("/:id/members/:memberId", CompanyController.removeMember as RequestHandler);
 router.post("/:id/invites", CompanyController.invite as RequestHandler);

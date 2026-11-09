@@ -1,4 +1,5 @@
-import { Op } from "sequelize";
+import { Op, Transaction } from "sequelize";
+import sequelize from "../configs/DB/sequelize";
 import EntitlementService from "./EntitlementService";
 import CompanyPolicyService from "./CompanyPolicyService";
 import Collection from "../models/Collection";
@@ -13,6 +14,15 @@ import NotificationService from "./NotificationService";
 import E2EItemService, { collectionLabel, nameFields, placeholderName, assertEncName } from "./E2EItemService";
 import CollectionKey from "../models/CollectionKey";
 import GroupService from "./GroupService";
+import AuditService from "./AuditService";
+import { checkCollectionChange, isWorkItem } from "./workItems";
+
+/** A collection change that passed the ownership rules (see workItems.ts). */
+export interface CollectionChange {
+  ids: number[];
+  companyId: number | null;
+  movesToCompany: boolean;
+}
 
 class CollectionService {
   private activeShareFilter(where: Record<string, unknown>) {
@@ -512,6 +522,11 @@ class CollectionService {
       attributes: ["noteId"],
     });
     const noteIds = links.map((link) => link.noteId);
+    // Items linked by the old column, and trashed ones, would be stranded too.
+    await this.assertKeepsWorkItems(
+      access.collection,
+      await this.noteIdsForCollections([collectionId], { paranoid: false })
+    );
     await CollectionNote.destroy({ where: { collectionId } });
     await Note.update(
       { collectionId: null, project: null },
@@ -522,6 +537,15 @@ class CollectionService {
     }
     await E2EItemService.dropCollection(collectionId);
     await access.collection.destroy();
+    // Its key copies went with it: that may finish an offboarding.
+    if (access.collection.companyId) {
+      try {
+        const { default: OffboardingService } = await import("./OffboardingService");
+        await OffboardingService.completeOpenFor(access.collection.companyId, userId);
+      } catch (error) {
+        console.error("Error completing offboardings:", error);
+      }
+    }
     return true;
   }
 
@@ -548,24 +572,42 @@ class CollectionService {
       });
     }
 
-    const notes = await Note.findAll({
-      where: { id: { [Op.in]: ids }, userId },
+    const found = await Note.findAll({
+      where: { id: { [Op.in]: ids } },
     });
+    const current = await this.collectionsByNoteId(found.map((note) => note.id));
+    // Your personal items; work items only where you can edit them, whoever made them.
+    const open = found.some((note) => isWorkItem(note, current.get(note.id)))
+      ? await this.openCompanyCollections(userId)
+      : new Map<number, "owner" | SharePermission>();
+    const notes = found.filter((note) =>
+      !isWorkItem(note, current.get(note.id))
+        ? note.userId === userId
+        : (current.get(note.id) || []).some((item) => {
+            const permission = open.get(item.id);
+            return permission === "owner" || permission === "edit";
+          })
+    );
     if (!notes.length) {
       throw Object.assign(new Error("You can only add notes you own"), {
         status: 400,
       });
     }
+    // Every item is checked before any moves, so a refusal changes nothing.
+    const changes = new Map<number, CollectionChange>();
+    for (const note of notes) {
+      const ids = [...new Set([...(current.get(note.id) || []).map((item) => item.id), collectionId])];
+      changes.set(note.id, await this.checkNoteCollections(note, ids, current.get(note.id)));
+    }
     // End-to-end items need a key copy for this collection (made in the browser).
-    const current = await this.collectionsByNoteId(notes.map((note) => note.id));
     await E2EItemService.ensure(userId, notes.map((note) => note.id), e2eKeys, {
-      collectionsByNote: new Map(
-        notes.map((note) => [note.id, [...(current.get(note.id) || []).map((item) => item.id), collectionId]])
-      ),
+      collectionsByNote: new Map(notes.map((note) => [note.id, changes.get(note.id)!.ids])),
     });
 
     for (const note of notes) {
-      await this.addNoteToCollection(note.id, collectionId, collectionLabel(access.collection));
+      await this.commitNoteCollections(note, changes.get(note.id)!, userId, (transaction) =>
+        this.addNoteToCollection(note.id, collectionId, collectionLabel(access.collection), transaction)
+      );
     }
 
     return { added: notes.length, skipped: ids.length - notes.length };
@@ -580,16 +622,40 @@ class CollectionService {
     const inCollection = Boolean(linked) || note?.collectionId === collectionId;
     if (!note || !access || !inCollection) return false;
 
+    const current = (await this.collectionsByNoteId([noteId])).get(noteId) || [];
+    const work = isWorkItem(note, current);
+    // A work item's creator needs edit access like anyone else.
     const canRemove =
-      access.permission === "owner" || note.userId === userId;
+      access.permission === "owner" ||
+      (work ? access.permission === "edit" : note.userId === userId);
     if (!canRemove) return false;
-
-    await CollectionNote.destroy({ where: { collectionId, noteId } });
-    await E2EItemService.dropItemKey(noteId, "collection", collectionId);
-    if (note.collectionId === collectionId) {
-      await note.update({ collectionId: null, project: null });
-      await this.restorePrimaryCollection(noteId);
+    // A work item can't leave its company; one without a companyId gets it once it is in one company only.
+    let companyId = note.companyId ?? null;
+    if (work) {
+      const rest = current.filter((item) => item.id !== collectionId);
+      if (note.companyId != null) {
+        await this.checkNoteCollections(note, rest.map((item) => item.id), current);
+      } else {
+        if (!rest.some((item) => item.companyId)) {
+          throw Object.assign(new Error("A company item stays in the company. Copy it to your personal vault instead."), {
+            status: 409,
+          });
+        }
+        // Still in two companies (or mixed): removing one is a step towards one owner, so it is allowed.
+        const companies = new Set(rest.map((item) => item.companyId ?? null));
+        if (companies.size === 1) companyId = [...companies][0];
+      }
     }
+
+    await sequelize.transaction(async (transaction) => {
+      await CollectionNote.destroy({ where: { collectionId, noteId }, transaction });
+      await E2EItemService.dropItemKey(noteId, "collection", collectionId, transaction);
+      if (note.collectionId === collectionId) {
+        await note.update({ collectionId: null, project: null }, { transaction });
+        await this.restorePrimaryCollection(noteId, transaction);
+      }
+      if (companyId !== (note.companyId ?? null)) await note.update({ companyId }, { transaction });
+    });
     return true;
   }
 
@@ -599,21 +665,25 @@ class CollectionService {
     const notes = await Note.findAll({
       where: {
         userId,
+        // Your own (personal) items only: a work item isn't yours, whoever made it.
+        companyId: { [Op.is]: null },
         ...(linkedIds.length ? { id: { [Op.notIn]: linkedIds } } : {}),
       },
       // End-to-end items have no readable title: the browser opens encData.
       attributes: ["id", "title", "collectionId", "e2e", "e2eId", "itemKey", "encData"],
       order: [["title", "ASC"]],
     });
-    return notes;
+    const linked = await this.collectionsByNoteId(notes.map((note) => note.id));
+    return notes.filter((note) => !isWorkItem(note, linked.get(note.id)));
   }
 
-  async noteIdsForCollections(collectionIds: number[]) {
-    const links = await this.linksForCollections(collectionIds);
+  /** `paranoid: false` also counts trashed items (legacy-column links; link rows stay while trashed). */
+  async noteIdsForCollections(collectionIds: number[], options: { paranoid?: boolean } = {}) {
+    const links = await this.linksForCollections(collectionIds, options);
     return [...new Set(links.map((link) => link.noteId))];
   }
 
-  async linksForCollections(collectionIds: number[]) {
+  async linksForCollections(collectionIds: number[], options: { paranoid?: boolean } = {}) {
     const ids = [...new Set(collectionIds.filter((id) => Number.isInteger(id)))];
     if (!ids.length) return [] as { noteId: number; collectionId: number }[];
     const links = await CollectionNote.findAll({
@@ -623,6 +693,7 @@ class CollectionService {
     const legacy = await Note.findAll({
       where: { collectionId: { [Op.in]: ids } },
       attributes: ["id", "collectionId"],
+      paranoid: options.paranoid ?? true,
     });
     const seen = new Set(links.map((link) => `${link.collectionId}:${link.noteId}`));
     const rows = links.map((link) => ({
@@ -674,6 +745,8 @@ class CollectionService {
     if (missing.length) {
       const notes = await Note.findAll({
         where: { id: { [Op.in]: missing }, collectionId: { [Op.not]: null } },
+        // Trashed items too: restoring one, or the delete guard, must see its company collection.
+        paranoid: false,
         include: [
           {
             model: Collection,
@@ -697,36 +770,125 @@ class CollectionService {
     return map;
   }
 
-  async setNoteCollections(noteId: number, collectionIds: number[]) {
+  async setNoteCollections(noteId: number, collectionIds: number[], transaction?: Transaction) {
     const ids = [...new Set(collectionIds.filter((id) => Number.isInteger(id)))];
     // Key copies for collections the item leaves go with it.
     const left = await CollectionNote.findAll({
       where: { noteId, ...(ids.length ? { collectionId: { [Op.notIn]: ids } } : {}) },
       attributes: ["collectionId"],
+      transaction,
     });
-    for (const link of left) await E2EItemService.dropItemKey(noteId, "collection", link.collectionId);
-    await CollectionNote.destroy({ where: { noteId } });
+    for (const link of left) await E2EItemService.dropItemKey(noteId, "collection", link.collectionId, transaction);
+    await CollectionNote.destroy({ where: { noteId }, transaction });
     if (ids.length) {
       await CollectionNote.bulkCreate(
-        ids.map((collectionId) => ({ collectionId, noteId }))
+        ids.map((collectionId) => ({ collectionId, noteId })),
+        { transaction }
       );
     }
     await Note.update(
       { collectionId: null, project: null },
-      { where: { id: noteId } }
+      { where: { id: noteId }, transaction }
     );
-    await this.restorePrimaryCollection(noteId);
+    await this.restorePrimaryCollection(noteId, transaction);
   }
 
-  async addNoteToCollection(noteId: number, collectionId: number, name: string) {
+  async addNoteToCollection(noteId: number, collectionId: number, name: string, transaction?: Transaction) {
     await CollectionNote.findOrCreate({
       where: { noteId, collectionId },
       defaults: { noteId, collectionId },
+      transaction,
     });
-    const note = await Note.findByPk(noteId);
+    const note = await Note.findByPk(noteId, { transaction });
     if (note && !note.collectionId) {
       // An encrypted name isn't copied onto the item.
-      await note.update({ collectionId, project: name || null });
+      await note.update({ collectionId, project: name || null }, { transaction });
+    }
+  }
+
+  /** Which company (if any) each of these collections belongs to. */
+  async collectionRefs(collectionIds: number[]) {
+    if (!collectionIds.length) return [];
+    const collections = await Collection.findAll({
+      where: { id: { [Op.in]: collectionIds } },
+      attributes: ["id", "companyId"],
+    });
+    return collections.map((item) => ({ id: item.id, companyId: item.companyId ?? null }));
+  }
+
+  /**
+   * A note's next collections, checked against the ownership rules. Throws the 400/409 answers.
+   * `current`: its collections now, so an item in company collections without a companyId counts as a work item.
+   */
+  async checkNoteCollections(
+    note: Pick<Note, "companyId">,
+    nextIds: number[],
+    current?: { companyId?: number | null }[]
+  ): Promise<CollectionChange> {
+    const ids = [...new Set(nextIds)];
+    const legacyWork = note.companyId == null && isWorkItem(note, current);
+    return { ids, ...checkCollectionChange(note.companyId ?? null, await this.collectionRefs(ids), legacyWork) };
+  }
+
+  /**
+   * Applies a checked collection change in one transaction: `link` updates the
+   * links, then the note gets its company. Into a company, the creator's own key
+   * copy goes last, and only when every collection holds a copy, so the item
+   * can always be opened.
+   */
+  async commitNoteCollections(
+    note: Note,
+    change: CollectionChange,
+    userId: number,
+    link: (transaction: Transaction) => Promise<unknown>
+  ) {
+    await sequelize.transaction(async (transaction) => {
+      await link(transaction);
+      const fields: { companyId?: number | null; itemKey?: null } = {};
+      if ((note.companyId ?? null) !== change.companyId) fields.companyId = change.companyId;
+      // A work item opens only through its collections' copies: without one per collection, nobody could open it.
+      if (note.e2e && change.movesToCompany) {
+        if (!(await E2EItemService.coversCollections(note.id, change.ids, transaction))) {
+          throw Object.assign(new Error("A key for one of the collections is missing. Try again."), { status: 409 });
+        }
+        fields.itemKey = null;
+      }
+      if (Object.keys(fields).length) await note.update(fields, { transaction });
+    });
+    if (change.movesToCompany) {
+      await AuditService.record({
+        actorId: userId,
+        action: "item_moved_to_company",
+        noteId: note.id,
+        companyId: change.companyId,
+      });
+    }
+  }
+
+  /** A company collection can't go while it is the only company collection of a work item in it. */
+  private async assertKeepsWorkItems(collection: Collection, noteIds: number[]) {
+    if (!collection.companyId || !noteIds.length) return;
+    const workItems = await Note.findAll({
+      where: { id: { [Op.in]: noteIds }, companyId: { [Op.ne]: null } },
+      attributes: ["id"],
+      // Trashed ones too: restored later, they would have no way in.
+      paranoid: false,
+    });
+    if (!workItems.length) return;
+    const linked = await this.collectionsByNoteId(workItems.map((note) => note.id));
+    const stranded = workItems.some(
+      (note) =>
+        !(linked.get(note.id) || []).some(
+          (item) => item.id !== collection.id && item.companyId === collection.companyId
+        )
+    );
+    if (stranded) {
+      throw Object.assign(
+        new Error(
+          "This collection holds company items that are in no other company collection. Move them to another company collection or delete them first."
+        ),
+        { status: 409 }
+      );
     }
   }
 
@@ -962,9 +1124,10 @@ class CollectionService {
     return new Map([...map.entries()].map(([id, set]) => [id, set.size]));
   }
 
-  private async restorePrimaryCollection(noteId: number) {
+  private async restorePrimaryCollection(noteId: number, transaction?: Transaction) {
     const links = await CollectionNote.findAll({
       where: { noteId },
+      transaction,
       include: [
         {
           model: Collection,
@@ -981,7 +1144,7 @@ class CollectionService {
     if (!primary) return;
     await Note.update(
       { collectionId: primary.id, project: collectionLabel(primary) || null },
-      { where: { id: noteId, collectionId: { [Op.is]: null } } }
+      { where: { id: noteId, collectionId: { [Op.is]: null } }, transaction }
     );
   }
 }

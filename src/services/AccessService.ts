@@ -65,10 +65,11 @@ class AccessService {
 
     const notes = await Note.findAll({
       where: { id: { [Op.in]: ids } },
-      attributes: ["id", "userId"],
+      attributes: ["id", "userId", "companyId"],
       paranoid: false,
     });
-    const ownerByNote = new Map(notes.map((note) => [note.id, note.userId]));
+    // A work item has no owner: its creator is listed like anyone else with access.
+    const ownerByNote = new Map(notes.map((note) => [note.id, note.companyId == null ? note.userId : undefined]));
     const linked = await CollectionService.collectionsByNoteId(ids);
     const collectionIds = [...new Set([...linked.values()].flat().map((item) => item.id))];
     const collections = collectionIds.length

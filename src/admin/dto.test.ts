@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { USER_ACTIVITY_ACTIONS } from "../services/AuditService";
+import { ACCOUNT_ACTIONS, USER_ACTIVITY_ACTIONS } from "../services/AuditService";
 import {
   parseUserAgent,
   toActivityRow,
@@ -335,5 +335,10 @@ describe("USER_ACTIVITY_ACTIONS", () => {
     expect(USER_ACTIVITY_ACTIONS.some((action) => action.startsWith("secret_link_"))).toBe(false);
     expect(USER_ACTIVITY_ACTIONS).toContain("login");
     expect(new Set(USER_ACTIVITY_ACTIONS).size).toBe(USER_ACTIVITY_ACTIONS.length);
+  });
+
+  it("leaves out moves into a company (they hint at vault items)", () => {
+    expect(ACCOUNT_ACTIONS).toContain("item_moved_to_company");
+    expect(USER_ACTIVITY_ACTIONS).not.toContain("item_moved_to_company");
   });
 });

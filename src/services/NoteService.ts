@@ -9,7 +9,7 @@ import Company from "../models/Company";
 import CompanyMember from "../models/CompanyMember";
 import EmailService from "./EmailService";
 import NotificationService from "./NotificationService";
-import CollectionService from "./CollectionService";
+import CollectionService, { type CollectionChange } from "./CollectionService";
 import { Op } from "sequelize";
 import sequelize from "../configs/DB/sequelize";
 import { isDecryptionFailure } from "../util/encryption";
@@ -27,6 +27,8 @@ import {
   storedPasskeys,
   withoutPrivateKeys,
 } from "../util/passkeyContent";
+import { matchesHost, normalizeHost } from "./hostMatch";
+import { isWorkItem, owningCompany } from "./workItems";
 
 // An authenticator (TOTP) key field. Same rule as the vault app (utils/totp.ts).
 // None of these contain "pass", so a key is never taken for a password.
@@ -127,7 +129,93 @@ function storedCategory<T extends string | undefined>(category: T): T {
   return (category === "login" ? "password" : category) as T;
 }
 
+/**
+ * Who may share an item or change its collections: the owner of a personal
+ * item, anyone with edit access to a work item.
+ */
+export function canManage(
+  access: {
+    note: Pick<Note, "companyId" | "userId">;
+    permission: "owner" | "edit" | "view";
+    /** A work item, also one in company collections without a companyId yet (see isWorkItem). */
+    work?: boolean;
+  },
+  userId: number
+): boolean {
+  const work = access.work ?? access.note.companyId != null;
+  if (!work) return access.permission === "owner" && access.note.userId === userId;
+  return access.permission === "edit";
+}
+
+/** The strongest permission these company collections give (an admin's "owner" counts as edit). */
+function companyPermission(
+  collections: { id: number }[],
+  open: Map<number, "owner" | SharePermission>,
+  permission: SharePermission | null = null
+) {
+  for (const collection of collections) {
+    const fromOpen = open.get(collection.id);
+    if (!fromOpen) continue;
+    const fromCollection = fromOpen === "owner" ? "edit" : fromOpen;
+    if (!permission || (permission === "view" && fromCollection === "edit")) {
+      permission = fromCollection;
+    }
+  }
+  return permission;
+}
+
 class NoteService {
+  /**
+   * A requested collection change, checked against the ownership rules, or
+   * null when there is none (or the caller may not make it).
+   */
+  private async collectionChange(
+    note: Note,
+    permission: SharePermission | "owner",
+    userId: number,
+    data: { collectionId?: number | null; collectionIds?: number[] }
+  ) {
+    const ids = this.requestedCollectionIds(data);
+    if (!ids) return null;
+    const current = (await CollectionService.collectionsByNoteId([note.id])).get(note.id);
+    if (!canManage({ note, permission, work: isWorkItem(note, current) }, userId)) return null;
+    for (const collectionId of ids) {
+      await CollectionService.assertCanAdd(collectionId, userId);
+    }
+    const change = await CollectionService.checkNoteCollections(note, ids, current);
+    await this.assertCanLeave(note, current, ids, userId);
+    return change;
+  }
+
+  /**
+   * A work item can leave a collection only for someone who can edit that
+   * collection, so saving through one collection never drops another.
+   */
+  private async assertCanLeave(
+    note: Pick<Note, "companyId">,
+    current: { id: number; companyId?: number | null }[] | undefined,
+    nextIds: number[],
+    userId: number
+  ) {
+    if (!isWorkItem(note, current)) return;
+    for (const collection of current || []) {
+      if (nextIds.includes(collection.id)) continue;
+      const access = await CollectionService.getAccess(collection.id, userId);
+      if (access?.permission !== "owner" && access?.permission !== "edit") {
+        throw Object.assign(new Error("You can't remove this item from a collection you can't edit."), {
+          status: 403,
+        });
+      }
+    }
+  }
+
+  /** Links the note to its new collections and company, in one transaction. */
+  private async commitCollections(note: Note, change: CollectionChange, userId: number) {
+    await CollectionService.commitNoteCollections(note, change, userId, (transaction) =>
+      CollectionService.setNoteCollections(note.id, change.ids, transaction)
+    );
+  }
+
   private requestedCollectionIds(data: {
     collectionId?: number | null;
     collectionIds?: number[];
@@ -264,6 +352,42 @@ class NoteService {
     };
   }
 
+  /**
+   * permissionByNoteId with each work item's permission taken from company
+   * access (its open company collections, or a share), like anyone else's.
+   */
+  private async withWorkPermissions(
+    userId: number,
+    notes: Note[],
+    collectionsByNoteId: Map<number, { id: number; companyId: number | null }[]>,
+    permissionByNoteId: Map<number, SharePermission>
+  ) {
+    const work = notes.filter((note) => isWorkItem(note, collectionsByNoteId.get(note.id)));
+    if (!work.length) return permissionByNoteId;
+    const open = await CollectionService.openCompanyCollections(userId);
+    const result = new Map(permissionByNoteId);
+    for (const note of work) {
+      const permission = companyPermission(
+        collectionsByNoteId.get(note.id) || [],
+        open,
+        permissionByNoteId.get(note.id) || null
+      );
+      if (permission) result.set(note.id, permission);
+      else result.delete(note.id);
+    }
+    return result;
+  }
+
+  /** The same for one item whose access was just resolved (getNoteAccess). */
+  private withAccessPermission(
+    access: { note: Note; permission: "owner" | SharePermission },
+    collections: { companyId: number | null }[] | undefined,
+    permissionByNoteId: Map<number, SharePermission>
+  ) {
+    if (!isWorkItem(access.note, collections) || access.permission === "owner") return permissionByNoteId;
+    return new Map(permissionByNoteId).set(access.note.id, access.permission);
+  }
+
   private async getSharedNoteIds(userId: number) {
     const maps = await this.getAccessMaps(userId);
     return maps;
@@ -294,7 +418,8 @@ class NoteService {
     favoriteNoteIds?: Set<number>,
     collections?: { id: number; name: string; companyId: number | null }[],
   ) {
-    const isOwner = note.userId === userId;
+    // A work item has no owner: its permission comes from permissionByNoteId.
+    const isOwner = note.userId === userId && !isWorkItem(note, collections);
     const permission = isOwner
       ? "owner"
       : permissionByNoteId.get(note.id) || "view";
@@ -357,9 +482,11 @@ class NoteService {
           : filters.collectionId
             ? []
             : ids;
-      const noteIds = await CollectionService.noteIdsForCollections(selected);
+      let noteIds = await CollectionService.noteIdsForCollections(selected);
+      if (filters.trash) noteIds = await this.trashedWorkItemIds(userId, noteIds);
       whereClause = {
         id: { [Op.in]: noteIds.length ? noteIds : [-1] },
+        ...(filters.trash ? { deletedAt: { [Op.not]: null } } : {}),
       };
     } else if (filters?.collectionId) {
       const access = await CollectionService.getAccess(
@@ -367,14 +494,18 @@ class NoteService {
         userId
       );
       if (!access) return [];
-      const noteIds = await CollectionService.noteIdsForCollections([
+      let noteIds = await CollectionService.noteIdsForCollections([
         filters.collectionId,
       ]);
+      if (filters?.trash && access.collection.companyId) {
+        noteIds = await this.trashedWorkItemIds(userId, noteIds);
+      }
       whereClause = {
         id: { [Op.in]: noteIds.length ? noteIds : [-1] },
       };
       if (filters?.trash) {
-        whereClause.userId = userId;
+        // A company collection's trash: the work items you can manage, whoever made them.
+        if (!access.collection.companyId) whereClause.userId = userId;
         whereClause.deletedAt = { [Op.not]: null };
       }
       if (filters?.sharedOnly) {
@@ -413,7 +544,8 @@ class NoteService {
     if (!filters?.companyId && !filters?.collectionId) {
       andClauses.push(
         sequelize.literal(`(
-          NOT EXISTS (
+          "Note"."companyId" IS NULL
+          AND NOT EXISTS (
             SELECT 1 FROM "collection_notes" cn
             JOIN "collections" c ON c.id = cn."collectionId"
             WHERE cn."noteId" = "Note"."id" AND c."companyId" IS NOT NULL
@@ -482,11 +614,12 @@ class NoteService {
     );
     const directIds = await this.directlySharedIds(userId, notes.map((note) => note.id));
     const keyPaths = await E2EItemService.keyPathsFor(userId, notes);
+    const permissions = await this.withWorkPermissions(userId, notes, collectionsByNoteId, permissionByNoteId);
     const search = String(filters?.search || "").trim().toLowerCase();
     return notes
       .map((note) => {
         const annotated = this.withKeyPaths(
-          this.annotateNote(note, userId, permissionByNoteId, favoriteNoteIds, collectionsByNoteId.get(note.id)),
+          this.annotateNote(note, userId, permissions, favoriteNoteIds, collectionsByNoteId.get(note.id)),
           keyPaths
         );
         const passwordHealth = passwordHealthById.get(note.id);
@@ -560,7 +693,13 @@ class NoteService {
       access.note.id,
     ]);
     const annotated = this.withKeyPaths(
-      this.annotateNote(access.note, userId, permissionByNoteId, favoriteNoteIds, collections.get(access.note.id)),
+      this.annotateNote(
+        access.note,
+        userId,
+        this.withAccessPermission(access, collections.get(access.note.id), permissionByNoteId),
+        favoriteNoteIds,
+        collections.get(access.note.id)
+      ),
       await E2EItemService.keyPathsFor(userId, [access.note])
     );
     if (annotated.isOwner) return annotated;
@@ -603,7 +742,7 @@ class NoteService {
     for (const note of notes) {
       const content = note.content as { decryptionFailed?: boolean };
       const linked = collectionsByNoteId.get(note.id) || [];
-      if (linked.some((collection) => collection.companyId)) continue;
+      if (isWorkItem(note, linked)) continue;
       if (content?.decryptionFailed) {
         skipped += 1;
         continue;
@@ -679,7 +818,8 @@ class NoteService {
         exported.push({
           e2e: true,
           e2eId: note.e2eId,
-          itemKey: note.userId === userId ? note.itemKey : null,
+          // Company items never carry a creator copy, even a stale one.
+          itemKey: null,
           e2eKeys: keyPaths.get(note.id) || { collections: [] },
           encData: note.encData,
           category: note.category,
@@ -806,7 +946,8 @@ class NoteService {
         await CollectionService.assertCanAdd(collectionId, userId);
       }
     }
-    if (data.e2e) return this.createSealed(userId, data, requested || []);
+    const companyId = owningCompany(await CollectionService.collectionRefs(requested || []));
+    if (data.e2e) return this.createSealed(userId, data, requested || [], companyId);
 
     const content = cleanOnCreate(data.content);
     await this.assertPasswordRule(requested || [], content);
@@ -819,6 +960,7 @@ class NoteService {
       tags: data.tags || [],
       isEncrypted: data.isEncrypted || storedPasskeys(content).length > 0,
       userId,
+      companyId,
     });
     await this.keepVersion(note.id, userId, {
       title: note.title,
@@ -840,31 +982,63 @@ class NoteService {
     });
     const favoriteNoteIds = await this.getFavoriteNoteIds(userId);
     const collections = await CollectionService.collectionsByNoteId([note.id]);
-    return this.annotateNote(
-      saved || note,
-      userId,
-      new Map(),
-      favoriteNoteIds,
-      collections.get(note.id)
+    return this.withKeyPaths(
+      this.annotateNote(
+        saved || note,
+        userId,
+        // A new work item shows the creator's company access, not ownership.
+        await this.withWorkPermissions(userId, [saved || note], collections, new Map()),
+        favoriteNoteIds,
+        collections.get(note.id)
+      ),
+      await E2EItemService.keyPathsFor(userId, [saved || note])
     );
   }
 
   /** A new end-to-end item: the server stores what the browser sealed. */
-  private async createSealed(userId: number, data: CreateNoteData, collectionIds: number[]) {
-    const sealed = assertSealed(data.e2e);
+  private async createSealed(userId: number, data: CreateNoteData, collectionIds: number[], companyId: number | null) {
+    const work = companyId !== null;
+    // An older app also wraps the key for its creator; a company item must not have that copy.
+    if (work && data.e2e?.itemKey) {
+      throw Object.assign(new Error("Update 2keevo: company items are saved without a personal key copy."), {
+        status: 400,
+      });
+    }
+    const sealed = assertSealed(data.e2e, { work });
     const version = data.version ? assertEncData(data.version, "version") : null;
-    const itemKeys = await E2EItemService.ensureNew(userId, sealed.e2eId, collectionIds, data.e2eKeys);
-    const note = await Note.create({
-      ...BLANK_FIELDS,
-      ...sealed,
-      e2e: true,
-      category: storedCategory(data.category) || "note",
-      collectionId: null,
-      userId,
+    const itemKeys = await E2EItemService.ensureNew(userId, sealed.e2eId, collectionIds, data.e2eKeys, { work });
+    // One transaction: a company item without its collection key copies could never be opened.
+    const note = await sequelize.transaction(async (transaction) => {
+      if (work) {
+        // A key replacement (rotate) locks the collection for update: it can't land while this holds.
+        await Collection.findAll({
+          where: { id: { [Op.in]: collectionIds } },
+          attributes: ["id"],
+          transaction,
+          lock: transaction.LOCK.SHARE,
+        });
+      }
+      const created = await Note.create(
+        {
+          ...BLANK_FIELDS,
+          ...sealed,
+          e2e: true,
+          category: storedCategory(data.category) || "note",
+          collectionId: null,
+          userId,
+          companyId,
+        },
+        { transaction }
+      );
+      if (collectionIds.length) await CollectionService.setNoteCollections(created.id, collectionIds, transaction);
+      await E2EItemService.storeNewItemKeys(created.id, itemKeys, transaction);
+      // A collection key replaced since the copies were made: with no creator copy nobody could open it.
+      if (work && !(await E2EItemService.coversCollections(created.id, collectionIds, transaction))) {
+        throw Object.assign(new Error("A collection key changed meanwhile. Try again."), { status: 409 });
+      }
+      return created;
     });
     if (version) await this.keepSealedVersion(note.id, userId, version);
-    if (collectionIds.length) await CollectionService.setNoteCollections(note.id, collectionIds);
-    await E2EItemService.storeNewItemKeys(note.id, itemKeys);
     if (data.isFavorite) await this.setUserFavorite(userId, note.id, true);
     return this.annotateSaved(note, userId);
   }
@@ -881,23 +1055,21 @@ class NoteService {
     }
     const encData = data.encData !== undefined ? assertEncData(data.encData) : undefined;
     const version = data.version ? assertEncData(data.version, "version") : null;
-    // Only the owner moves an item between collections.
-    const requested = permission === "owner" ? this.requestedCollectionIds(data) : null;
-    if (requested) {
-      for (const collectionId of requested) {
-        await CollectionService.assertCanAdd(collectionId, userId);
-      }
+    const change = await this.collectionChange(note, permission, userId, data);
+    if (change) {
       await E2EItemService.ensure(userId, [note.id], data.e2eKeys, {
-        collectionsByNote: new Map([[note.id, requested]]),
+        collectionsByNote: new Map([[note.id, change.ids]]),
       });
+      // First: a refused move must not save the edit anyway.
+      await this.commitCollections(note, change, userId);
     }
     await note.update({
       ...(encData ? { encData } : {}),
       ...(data.category !== undefined ? { category: storedCategory(data.category) } : {}),
     });
     if (version) await this.keepSealedVersion(note.id, userId, version);
-    if (requested) await CollectionService.setNoteCollections(note.id, requested);
-    if (data.isFavorite !== undefined && permission === "owner") {
+    // Favorites are per person: anyone saving a work item may set theirs here.
+    if (data.isFavorite !== undefined && (permission === "owner" || isWorkItem(note))) {
       await this.setUserFavorite(userId, note.id, Boolean(data.isFavorite));
     }
     return this.annotateSaved(note, userId, permission);
@@ -910,8 +1082,10 @@ class NoteService {
     const collections = await CollectionService.collectionsByNoteId([note.id]);
     const permissionByNoteId = new Map<number, SharePermission>();
     if (permission !== "owner") permissionByNoteId.set(note.id, permission);
+    // A work item (new, or just moved into a company) shows the caller's company access.
+    const permissions = await this.withWorkPermissions(userId, [saved || note], collections, permissionByNoteId);
     return this.withKeyPaths(
-      this.annotateNote(saved || note, userId, permissionByNoteId, favoriteNoteIds, collections.get(note.id)),
+      this.annotateNote(saved || note, userId, permissions, favoriteNoteIds, collections.get(note.id)),
       await E2EItemService.keyPathsFor(userId, [saved || note])
     );
   }
@@ -976,12 +1150,9 @@ class NoteService {
         (data.isEncrypted !== undefined ? data.isEncrypted : note.isEncrypted),
     };
 
-    const requested = this.requestedCollectionIds(data);
-    if (access.permission === "owner" && requested) {
-      for (const collectionId of requested) {
-        await CollectionService.assertCanAdd(collectionId, userId);
-      }
-    }
+    const change = await this.collectionChange(note, access.permission, userId, data);
+    // First: a refused move must not save the edit anyway.
+    if (change) await this.commitCollections(note, change, userId);
 
     await note.update(payload);
     await this.keepVersion(
@@ -990,11 +1161,9 @@ class NoteService {
       { title: payload.title, category: payload.category, tags: payload.tags || [], content },
       before
     );
-    if (access.permission === "owner" && requested) {
-      await CollectionService.setNoteCollections(note.id, requested);
-    }
 
-    if (access.permission === "owner" && data.isFavorite !== undefined) {
+    // Favorites are per person: anyone saving a work item may set theirs here.
+    if ((access.permission === "owner" || isWorkItem(note)) && data.isFavorite !== undefined) {
       await this.setUserFavorite(userId, note.id, Boolean(data.isFavorite));
     }
 
@@ -1007,12 +1176,16 @@ class NoteService {
     if (access.permission !== "owner") {
       permissionByNoteId.set(noteId, access.permission);
     }
-    return this.annotateNote(
-      saved || note,
-      userId,
-      permissionByNoteId,
-      favoriteNoteIds,
-      collections.get(note.id)
+    return this.withKeyPaths(
+      this.annotateNote(
+        saved || note,
+        userId,
+        // A work item (or one just moved into a company) shows the caller's company access.
+        await this.withWorkPermissions(userId, [saved || note], collections, permissionByNoteId),
+        favoriteNoteIds,
+        collections.get(note.id)
+      ),
+      await E2EItemService.keyPathsFor(userId, [saved || note])
     );
   }
 
@@ -1107,7 +1280,7 @@ class NoteService {
   }
 
   async autofill(userId: number, host: string, query = "") {
-    const pageHost = this.normalizeHost(host);
+    const pageHost = normalizeHost(host);
     const q = query.trim().toLowerCase();
     if (!pageHost && q.length < 2) {
       throw Object.assign(new Error("Invalid site"), { status: 400 });
@@ -1139,7 +1312,7 @@ class NoteService {
       const fields = Array.isArray(content.customFields) ? content.customFields : [];
       const matched = q
         ? this.noteMatchesQuery(note.title, fields, q)
-        : this.noteMatchesHost(note.title, fields, pageHost);
+        : matchesHost(this.matchTexts(note.title, fields), pageHost);
       if (!matched) return;
       const password = this.pickPassword(fields);
       const totp = this.pickTotp(fields);
@@ -1166,20 +1339,23 @@ class NoteService {
     const notes = noteIds.length
       ? await Note.findAll({
           where: { id: { [Op.in]: noteIds }, e2e: true },
-          attributes: ["id", "userId", "category", "e2e", "e2eId", "itemKey", "encData", "updatedAt"],
+          attributes: ["id", "userId", "companyId", "category", "e2e", "e2eId", "itemKey", "encData", "updatedAt"],
         })
       : [];
     const { permissionByNoteId } = await this.getAccessMaps(userId);
+    const collectionsByNoteId = await CollectionService.collectionsByNoteId(notes.map((note) => note.id));
+    const permissions = await this.withWorkPermissions(userId, notes, collectionsByNoteId, permissionByNoteId);
     const keyPaths = await E2EItemService.keyPathsFor(userId, notes);
     return notes.map((note) => {
-      const isOwner = note.userId === userId;
+      // A work item has no owner and no creator copy of its key.
+      const isOwner = note.userId === userId && !isWorkItem(note, collectionsByNoteId.get(note.id));
       return {
         id: note.id,
         title: "",
         category: note.category,
         content: {},
         isOwner,
-        permission: isOwner ? "owner" : permissionByNoteId.get(note.id) || "view",
+        permission: isOwner ? "owner" : permissions.get(note.id) || "view",
         e2e: true,
         e2eId: note.e2eId,
         encData: note.encData,
@@ -1269,16 +1445,14 @@ class NoteService {
           ...(sharedNoteIds.length ? [{ id: { [Op.in]: sharedNoteIds } }] : []),
         ],
       },
-      attributes: ["id"],
+      attributes: ["id", "companyId"],
     });
     const collectionsByNote = await CollectionService.collectionsByNoteId(
       personalCandidates.map((note) => note.id)
     );
+    // Work items come only through open company collections below, never as the creator's.
     const personalIds = personalCandidates
-      .filter((note) => {
-        const linked = collectionsByNote.get(note.id) || [];
-        return !linked.some((collection) => collection.companyId);
-      })
+      .filter((note) => !isWorkItem(note, collectionsByNote.get(note.id)))
       .map((note) => note.id);
 
     const openCollections = await CollectionService.openCompanyCollections(userId);
@@ -1300,56 +1474,6 @@ class NoteService {
     return [...new Set([...personalIds, ...companyIds])];
   }
 
-  private normalizeHost(value: string) {
-    const host = String(value || "")
-      .trim()
-      .toLowerCase()
-      .replace(/\.$/, "")
-      .replace(/^www\./, "");
-    if (!host || host.length > 253 || !/^[a-z0-9.-]+$/.test(host)) return "";
-    return host;
-  }
-
-  private rootHost(host: string) {
-    if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) return host;
-    const multi = ["co.uk", "com.au", "co.jp", "com.br", "co.nz", "com.tr", "co.za"];
-    for (const suffix of multi) {
-      if (host.endsWith(`.${suffix}`)) {
-        const left = host.slice(0, -(suffix.length + 1));
-        const brand = left.split(".").pop();
-        return brand ? `${brand}.${suffix}` : host;
-      }
-    }
-    const parts = host.split(".");
-    return parts.length <= 2 ? host : parts.slice(-2).join(".");
-  }
-
-  private hostFromText(value: string) {
-    const trimmed = String(value || "").trim();
-    if (!trimmed || /\s/.test(trimmed) || trimmed.includes("@")) return "";
-    try {
-      const withProtocol = /^https?:\/\//i.test(trimmed)
-        ? trimmed
-        : `https://${trimmed}`;
-      const hostname = new URL(withProtocol).hostname;
-      if (!hostname.includes(".")) return "";
-      return this.normalizeHost(hostname);
-    } catch {
-      return "";
-    }
-  }
-
-  private noteMatchesHost(title: string, fields: any[], pageHost: string) {
-    const site = this.rootHost(pageHost);
-    const texts = this.matchTexts(title, fields);
-    if (texts.some((text) => this.nameMatchesHost(text, pageHost))) return true;
-
-    const savedHosts = texts
-      .map((text) => this.hostFromText(text))
-      .filter((host) => host);
-    return savedHosts.some((host) => this.rootHost(host) === site);
-  }
-
   private noteMatchesQuery(title: string, fields: any[], query: string) {
     return this.matchTexts(title, fields).some((text) =>
       text.toLowerCase().includes(query)
@@ -1363,20 +1487,6 @@ class NoteService {
         .filter((field) => field?.value && !isSecretFieldLabel(field.label))
         .map((field) => String(field.value)),
     ];
-  }
-
-  private nameMatchesHost(value: string, pageHost: string) {
-    const labels = pageHost.toLowerCase().split(".");
-    const ignored = new Set(["www", "com", "net", "org", "io", "app", "ru", "co"]);
-    return value
-      .toLowerCase()
-      .split(/[^a-z0-9]+/)
-      .filter((token) => token.length >= 2 && !ignored.has(token))
-      .some(
-        (token) =>
-          labels.includes(token) ||
-          (token.length >= 4 && labels.some((label) => label.includes(token)))
-      );
   }
 
   private pickPassword(fields: any[]) {
@@ -1553,6 +1663,7 @@ class NoteService {
     await sequelize.query(
       `DELETE FROM "notes"
        WHERE "userId" = :userId
+         AND "companyId" IS NULL
          AND "deletedAt" IS NOT NULL
          AND "deletedAt" < :cutoff
          AND NOT EXISTS (
@@ -1572,6 +1683,7 @@ class NoteService {
     const [, metadata] = await sequelize.query(
       `DELETE FROM "notes"
        WHERE "userId" = :userId
+         AND "companyId" IS NULL
          AND "deletedAt" IS NOT NULL
          AND NOT EXISTS (
            SELECT 1 FROM "collection_notes" cn
@@ -1600,25 +1712,17 @@ class NoteService {
     }
 
     const notes = await Note.findAll({
-      where: { id: { [Op.in]: ids }, userId },
+      where: { id: { [Op.in]: ids } },
     });
-    if (!notes.length) {
-      throw Object.assign(new Error("You can only change notes you own"), {
-        status: 400,
-      });
-    }
 
     const collectionsByNote = await CollectionService.collectionsByNoteId(
       notes.map((note) => note.id)
     );
-    const openCollections = await CollectionService.openCompanyCollections(userId);
-    const editable = notes.filter((note) => {
-      const companyCollections = (collectionsByNote.get(note.id) || []).filter(
-        (collection) => collection.companyId
-      );
-      if (!companyCollections.length) return true;
-      return companyCollections.some((collection) => openCollections.has(collection.id));
-    });
+    // Your personal items; work items only where you can manage them (edit access), whoever made them.
+    const manageable = await this.manageableWorkItems(userId, notes, collectionsByNote);
+    const editable = notes.filter((note) =>
+      isWorkItem(note, collectionsByNote.get(note.id)) ? manageable.has(note.id) : note.userId === userId
+    );
     if (!editable.length) {
       throw Object.assign(new Error("You can only change notes you own"), {
         status: 400,
@@ -1641,6 +1745,13 @@ class NoteService {
       const access = await CollectionService.assertCanAdd(collectionId, userId);
       nextIds.push(access.collection.id);
     }
+    // Every item is checked before any moves, so a refusal changes nothing.
+    const changes = new Map<number, CollectionChange>();
+    for (const note of editable) {
+      const change = await CollectionService.checkNoteCollections(note, nextIds, collectionsByNote.get(note.id));
+      await this.assertCanLeave(note, collectionsByNote.get(note.id), nextIds, userId);
+      changes.set(note.id, change);
+    }
     await E2EItemService.ensure(
       userId,
       editable.map((note) => note.id),
@@ -1649,7 +1760,7 @@ class NoteService {
     );
 
     for (const note of editable) {
-      await CollectionService.setNoteCollections(note.id, nextIds);
+      await this.commitCollections(note, changes.get(note.id)!, userId);
     }
 
     return {
@@ -1660,11 +1771,11 @@ class NoteService {
   }
 
   /**
-   * Delete a note (owner only)
+   * Delete a note (its owner; for a work item, anyone who can manage it)
    */
   async deleteNote(noteId: number, userId: number) {
     const access = await this.getNoteAccess(noteId, userId);
-    if (!access || access.permission !== "owner") {
+    if (!access || !canManage(access, userId)) {
       return false;
     }
 
@@ -1673,31 +1784,101 @@ class NoteService {
   }
 
   /**
-   * Restore a soft-deleted note (owner only)
+   * Restore a soft-deleted note (its owner; for a work item, anyone with edit
+   * access through its company collections)
    */
   async restoreNote(noteId: number, userId: number) {
     const note = await Note.findOne({
-      where: { id: noteId, userId },
+      where: { id: noteId },
       paranoid: false,
     });
 
     if (!note || !note.deletedAt) {
       return false;
     }
-
-    const linked = await CollectionService.collectionsByNoteId([note.id]);
-    const companyCollections = (linked.get(note.id) || []).filter(
-      (collection) => collection.companyId
-    );
-    if (companyCollections.length) {
-      const open = await CollectionService.openCompanyCollections(userId);
-      if (!companyCollections.some((collection) => open.has(collection.id))) {
-        return false;
-      }
+    if (!(await this.manageAccess(noteId, userId, note))) {
+      return false;
     }
 
     await note.restore();
     return true;
+  }
+
+  /**
+   * Of these items, the work items this person can manage now: edit through
+   * active company access (an open company collection, or a direct share
+   * while active in the company). The rules of getNoteAccess + canManage, for
+   * many items at once and for trashed ones too.
+   */
+  private async manageableWorkItems(
+    userId: number,
+    notes: Note[],
+    collectionsByNote: Map<number, { id: number; companyId: number | null }[]>,
+    open?: Map<number, "owner" | SharePermission>
+  ) {
+    const work = notes.filter((note) => isWorkItem(note, collectionsByNote.get(note.id)));
+    if (!work.length) return new Set<number>();
+    const openCollections = open || (await CollectionService.openCompanyCollections(userId));
+    const activeCompanies = await CollectionService.activeCompanyIds(userId);
+    const shares = await NoteShare.findAll({
+      where: this.activeShareFilter({ noteId: { [Op.in]: work.map((note) => note.id) }, sharedWithUserId: userId }),
+      attributes: ["noteId", "permission"],
+    });
+    const result = new Set<number>();
+    for (const note of work) {
+      const linked = collectionsByNote.get(note.id) || [];
+      const inActiveCompany = [note.companyId, ...linked.map((collection) => collection.companyId)].some(
+        (companyId) => companyId && activeCompanies.has(companyId)
+      );
+      const share = inActiveCompany ? shares.find((row) => row.noteId === note.id)?.permission : undefined;
+      const permission = companyPermission(linked, openCollections, share || null);
+      if (permission && canManage({ note, permission, work: true }, userId)) result.add(note.id);
+    }
+    return result;
+  }
+
+  /** Every work item this person can manage now (trashed ones too, with paranoid: false). */
+  async manageableWorkItemIds(userId: number, options: { paranoid?: boolean } = {}) {
+    const open = await CollectionService.openCompanyCollections(userId);
+    const editable = [...open.entries()]
+      .filter(([, permission]) => permission !== "view")
+      .map(([collectionId]) => collectionId);
+    const inCollections = editable.length ? await CollectionService.noteIdsForCollections(editable) : [];
+    const shares = await NoteShare.findAll({
+      where: this.activeShareFilter({ sharedWithUserId: userId, permission: "edit" }),
+      attributes: ["noteId"],
+    });
+    const ids = [...new Set([...inCollections, ...shares.map((share) => share.noteId)])];
+    if (!ids.length) return [];
+    const notes = await Note.findAll({
+      where: { id: { [Op.in]: ids } },
+      attributes: ["id", "userId", "companyId"],
+      paranoid: options.paranoid ?? true,
+    });
+    const collectionsByNote = await CollectionService.collectionsByNoteId(notes.map((note) => note.id));
+    const manageable = await this.manageableWorkItems(userId, notes, collectionsByNote, open);
+    return notes.filter((note) => manageable.has(note.id)).map((note) => note.id);
+  }
+
+  /** Of these items, the work items this person can manage (and so restore), trashed ones included. */
+  private async trashedWorkItemIds(userId: number, noteIds: number[]) {
+    if (!noteIds.length) return [];
+    const manageable = new Set(await this.manageableWorkItemIds(userId, { paranoid: false }));
+    return noteIds.filter((id) => manageable.has(id));
+  }
+
+  /**
+   * Whether this person may manage an item now, trashed or not: its owner for
+   * a personal item, edit through company access for a work item. Null when
+   * they may not; otherwise whether it is a work item.
+   */
+  async manageAccess(noteId: number, userId: number, found?: Note | null) {
+    const note = found || (await Note.findOne({ where: { id: noteId }, paranoid: false }));
+    if (!note) return null;
+    const collections = (await CollectionService.collectionsByNoteId([note.id])).get(note.id) || [];
+    if (!isWorkItem(note, collections)) return note.userId === userId ? { work: false } : null;
+    const manageable = await this.manageableWorkItems(userId, [note], new Map([[note.id, collections]]));
+    return manageable.has(note.id) ? { work: true } : null;
   }
 
   /**
@@ -1742,12 +1923,15 @@ class NoteService {
     const { permissionByNoteId } = await this.getSharedNoteIds(userId);
     const favoriteNoteIds = await this.getFavoriteNoteIds(userId);
     const collections = await CollectionService.collectionsByNoteId([noteId]);
-    return this.annotateNote(
-      access.note,
-      userId,
-      permissionByNoteId,
-      favoriteNoteIds,
-      collections.get(noteId)
+    return this.withKeyPaths(
+      this.annotateNote(
+        access.note,
+        userId,
+        this.withAccessPermission(access, collections.get(noteId), permissionByNoteId),
+        favoriteNoteIds,
+        collections.get(noteId)
+      ),
+      await E2EItemService.keyPathsFor(userId, [access.note])
     );
   }
 
@@ -1787,7 +1971,7 @@ class NoteService {
     const companyCollections = (linked.get(note.id) || []).filter(
       (collection) => collection.companyId
     );
-    if (companyCollections.length) {
+    if (isWorkItem(note, companyCollections)) {
       return this.companyNoteAccess(note, userId, companyCollections);
     }
 
@@ -1824,23 +2008,15 @@ class NoteService {
     companyCollections: { id: number; companyId?: number | null }[]
   ) {
     const open = await CollectionService.openCompanyCollections(userId);
-    let permission: SharePermission | null = null;
-    for (const collection of companyCollections) {
-      const fromOpen = open.get(collection.id);
-      if (!fromOpen) continue;
-      const fromCollection = fromOpen === "owner" ? "edit" : fromOpen;
-      if (!permission || (permission === "view" && fromCollection === "edit")) {
-        permission = fromCollection;
-      }
-    }
+    let permission = companyPermission(companyCollections, open);
 
     const share = await NoteShare.findOne({
       where: this.activeShareFilter({ noteId: note.id, sharedWithUserId: userId }),
     });
     if (share) {
       const activeCompanies = await CollectionService.activeCompanyIds(userId);
-      const inActiveCompany = companyCollections.some(
-        (collection) => collection.companyId && activeCompanies.has(collection.companyId)
+      const inActiveCompany = [note.companyId, ...companyCollections.map((collection) => collection.companyId)].some(
+        (companyId) => companyId && activeCompanies.has(companyId)
       );
       if (
         inActiveCompany &&
@@ -1850,13 +2026,14 @@ class NoteService {
       }
     }
 
+    // The creator gets what their company access gives, like anyone else.
     if (!permission) return null;
-    if (note.userId === userId) return { note, permission: "owner" as const };
-    return { note, permission };
+    return { note, permission, work: true };
   }
 
   /**
-   * Share a note with another user by email or username (owner only)
+   * Share a note with another user by email or username (owner only; for a
+   * work item, anyone who can manage it)
    */
   async shareNote(
     noteId: number,
@@ -1866,7 +2043,7 @@ class NoteService {
     expiresAt: Date | null = null,
   ) {
     const access = await this.getNoteAccess(noteId, ownerId);
-    if (!access || access.permission !== "owner") {
+    if (!access || !canManage(access, ownerId)) {
       throw Object.assign(
         new Error("Note not found or you are not the owner"),
         {
@@ -2006,10 +2183,10 @@ class NoteService {
     expiresAt: Date | null = null,
     e2eKeys?: unknown,
   ) {
-    // Owner check first: the end-to-end key step below must never run for
+    // Manage check first: the end-to-end key step below must never run for
     // someone else's note (it would reveal which notes exist and who has them).
     const access = await this.getNoteAccess(noteId, ownerId);
-    if (!access || access.permission !== "owner") {
+    if (!access || !canManage(access, ownerId)) {
       throw Object.assign(new Error("Note not found or you are not the owner"), {
         status: 404,
       });
@@ -2084,7 +2261,7 @@ class NoteService {
    */
   async getNoteShares(noteId: number, ownerId: number) {
     const access = await this.getNoteAccess(noteId, ownerId);
-    if (!access || access.permission !== "owner") {
+    if (!access || !canManage(access, ownerId)) {
       throw Object.assign(
         new Error("Note not found or you are not the owner"),
         {
@@ -2111,7 +2288,7 @@ class NoteService {
    */
   async revokeShare(noteId: number, ownerId: number, sharedWithUserId: number) {
     const access = await this.getNoteAccess(noteId, ownerId);
-    if (!access || access.permission !== "owner") {
+    if (!access || !canManage(access, ownerId)) {
       throw Object.assign(
         new Error("Note not found or you are not the owner"),
         {
@@ -2138,18 +2315,18 @@ class NoteService {
    * collections are returned so you can leave them too.
    */
   async leaveShare(noteId: number, userId: number) {
-    const note = await Note.findByPk(noteId, { attributes: ["id", "userId", "title"] });
+    const note = await Note.findByPk(noteId, { attributes: ["id", "userId", "companyId", "title"] });
     if (!note) {
       throw Object.assign(new Error("Item not found"), { status: 404 });
     }
-    if (note.userId === userId) {
+    if (note.userId === userId && note.companyId == null) {
       throw Object.assign(new Error("This is your own item. Move it to Trash instead."), {
         status: 400,
       });
     }
 
     const linked = (await CollectionService.collectionsByNoteId([noteId])).get(noteId) || [];
-    if (linked.some((collection) => collection.companyId)) {
+    if (isWorkItem(note, linked)) {
       throw Object.assign(
         new Error("Company items follow your access in the company. Ask a company admin."),
         { status: 400 }
@@ -2194,15 +2371,17 @@ class NoteService {
    */
   async getAccessList(noteId: number, userId: number) {
     const note = await Note.findByPk(noteId, {
-      attributes: ["id", "userId"],
+      attributes: ["id", "userId", "companyId"],
       include: [{ model: User, as: "user", attributes: ["id", "username", "email", "fullName"] }],
     });
     if (!note) return null;
-    const companyIds = (
-      (await CollectionService.collectionsByNoteId([noteId])).get(noteId) || []
-    )
-      .map((collection) => collection.companyId)
-      .filter((id): id is number => !!id);
+    const companyIds = [
+      ...new Set(
+        [note.companyId, ...((await CollectionService.collectionsByNoteId([noteId])).get(noteId) || []).map(
+          (collection) => collection.companyId
+        )].filter((id): id is number => !!id)
+      ),
+    ];
     const managed = await this.managedCompanyIds(userId);
     // Company items: only companies you manage, and only access through them.
     const scope = new Set(companyIds.filter((id) => managed.has(id)));
@@ -2212,7 +2391,8 @@ class NoteService {
 
     const people =
       (await AccessService.peopleByNote([noteId], managed)).get(noteId) || [];
-    const owner = note.get("user") as User | undefined;
+    // A work item has no owner: it belongs to the company, not whoever made it.
+    const owner = companyIds.length ? undefined : (note.get("user") as User | undefined);
     return {
       owner: owner
         ? { userId: owner.id, name: owner.fullName || owner.username, email: owner.email }
