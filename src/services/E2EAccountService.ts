@@ -158,12 +158,21 @@ class E2EAccountService {
     };
   }
 
-  async enable(user: User, input: any) {
+  /**
+   * Before turning it on: the account's current password. Checked on its own
+   * first, so a wrong one is caught before the browser makes keys and shows a
+   * recovery key that would never be used.
+   */
+  async checkPasswordForEnable(user: User, password: unknown) {
     if (user.e2eEnabled) throw new E2EError("End-to-end encryption is already on.");
-    const current = String(input?.password || "");
+    const current = String(password || "");
     if (!current || !(await user.comparePassword(current))) {
       throw new E2EError("Your current password isn't right.", 401);
     }
+  }
+
+  async enable(user: User, input: any) {
+    await this.checkPasswordForEnable(user, input?.password);
     const values = await this.checkedBundle(input);
     await user.update({ ...values, e2eEnabled: true, e2eSince: new Date() });
     // New keys: copies made for any earlier ones can't be opened. Without them,

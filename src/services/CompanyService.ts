@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import { Op } from "sequelize";
 import sequelize from "../configs/DB/sequelize";
 import Company, { type CompanyPolicies } from "../models/Company";
@@ -12,6 +13,19 @@ import OffboardingService from "./OffboardingService";
 import StripeService from "./StripeService";
 
 const INVITE_MS = 14 * 24 * 60 * 60 * 1000;
+
+/**
+ * Invites are bound to the inbox they were sent to (F15): accepting needs the
+ * single-use token from the email. Sign-up doesn't verify email addresses, so
+ * the address alone isn't enough. Only the hash is stored.
+ */
+const hashInviteToken = (token: string) => crypto.createHash("sha256").update(token).digest("hex");
+const inviteTokenMatches = (token: unknown, hash: string | null | undefined) => {
+  if (typeof token !== "string" || !token || !hash) return false;
+  const given = Buffer.from(hashInviteToken(token), "hex");
+  const stored = Buffer.from(hash, "hex");
+  return given.length === stored.length && crypto.timingSafeEqual(given, stored);
+};
 
 export interface CompanySummary {
   id: number;
@@ -205,12 +219,16 @@ class CompanyService {
       throw Object.assign(new Error("That person is already invited"), { status: 400 });
     }
 
+    // A new token each time: re-inviting makes any older link stop working.
+    const token = crypto.randomBytes(32).toString("base64url");
+    const inviteTokenHash = hashInviteToken(token);
     const previous = existing
       ? {
           status: existing.status,
           role: existing.role,
           userId: existing.userId,
           expiresAt: existing.expiresAt,
+          inviteTokenHash: existing.inviteTokenHash ?? null,
         }
       : null;
     const member = existing
@@ -219,6 +237,7 @@ class CompanyService {
           role: nextRole,
           userId: existing.userId || existingUser?.id || null,
           expiresAt,
+          inviteTokenHash,
         })
       : await CompanyMember.create({
           companyId,
@@ -227,6 +246,7 @@ class CompanyService {
           role: nextRole,
           status: "invited",
           expiresAt,
+          inviteTokenHash,
         });
 
     const company = await Company.findByPk(companyId);
@@ -241,6 +261,7 @@ class CompanyService {
         to: normalized,
         companyId,
         companyName,
+        token,
       });
     } catch (error) {
       if (previous && existing) await existing.update(previous);
@@ -255,6 +276,8 @@ class CompanyService {
       status: member.status,
       expiresAt: member.expiresAt ? member.expiresAt.toISOString() : null,
       emailSent,
+      // Email isn't set up: the inviter sends the link themselves. Never when it was emailed.
+      ...(emailSent ? {} : { inviteLink: EmailService.companyInviteLink(companyId, token) }),
     };
   }
 
@@ -310,11 +333,18 @@ class CompanyService {
     return { ok: true };
   }
 
-  async accept(companyId: number, userId: number) {
+  /** Join with the token from the invite email; it's cleared, so the link works once. */
+  async accept(companyId: number, userId: number, token: unknown) {
     const user = await this.requireUser(userId);
     await this.claimInvites(userId, user.email);
     const member = await this.openInvite(companyId, userId);
-    await member.update({ status: "active", expiresAt: null });
+    if (!member.inviteTokenHash) {
+      throw Object.assign(new Error("This invite is from before invite links. Ask for a new invite."), { status: 403 });
+    }
+    if (!inviteTokenMatches(token, member.inviteTokenHash)) {
+      throw Object.assign(new Error("Open the link in your invitation email to join."), { status: 403 });
+    }
+    await member.update({ status: "active", expiresAt: null, inviteTokenHash: null });
     // Accepted members are billed (pro rata); invited people never are.
     StripeService.syncSeatsLater(companyId);
     // The company's rules (e.g. require 2FA) apply from the first request.

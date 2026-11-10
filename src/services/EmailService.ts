@@ -55,13 +55,20 @@ class EmailService {
     }
   }
 
+  /** The link that accepts a company invite: the token in it is needed to join. */
+  companyInviteLink(companyId: number, token: string) {
+    const origin = EnvVars.FrontendOrigin || "http://localhost:5173";
+    return `${origin}/invite?company=${companyId}&token=${encodeURIComponent(token)}`;
+  }
+
   async sendCompanyInvite(input: {
     to: string;
     companyId: number;
     companyName: string;
+    /** Single-use; only whoever reads this inbox can accept. */
+    token: string;
   }) {
-    const origin = EnvVars.FrontendOrigin || "http://localhost:5173";
-    const link = `${origin}/company/${input.companyId}`;
+    const link = this.companyInviteLink(input.companyId, input.token);
     const companyName = input.companyName || "A Company";
     const subject = `Invitation to join ${companyName} on 2keevo`;
     const text = [

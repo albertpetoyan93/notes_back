@@ -46,6 +46,18 @@ export default class E2EController {
     }
   };
 
+  /** Step 1 of turning it on: is this the account's current password? Nothing is changed. */
+  static checkPassword = async (req: AuthedRequest, res: Response, next: NextFunction) => {
+    try {
+      const user = await signedInUser(req, res);
+      if (!user) return;
+      await E2EAccountService.checkPasswordForEnable(user, req.body?.password);
+      res.send({ ok: true });
+    } catch (error) {
+      fail(error, res, next);
+    }
+  };
+
   static enable = async (req: AuthedRequest, res: Response, next: NextFunction) => {
     try {
       const user = await signedInUser(req, res);

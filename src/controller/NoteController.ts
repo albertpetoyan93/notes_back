@@ -2,6 +2,7 @@ import { Response } from "express";
 import NoteService from "../services/NoteService";
 import AuditService from "../services/AuditService";
 import NotificationService from "../services/NotificationService";
+import OffboardingService from "../services/OffboardingService";
 import User from "../models/User";
 import UserSession from "../models/UserSession";
 import { PlanLimitError, planLimitBody } from "../services/EntitlementService";
@@ -767,11 +768,24 @@ export default class NoteController {
       const action = req.body?.action;
       const field = String(req.body?.field || "").trim().slice(0, 100);
       if (!userId) return res.status(401).json({ message: "Unauthorized" });
-      if (isNaN(noteId) || (action !== "field_revealed" && action !== "field_copied")) {
+      if (
+        isNaN(noteId) ||
+        (action !== "field_revealed" && action !== "field_copied" && action !== "password_changed")
+      ) {
         return res.status(400).json({ message: "Invalid event" });
       }
       const access = await NoteService.getNoteAccess(noteId, userId);
       if (!access) return res.status(404).json({ message: "Note not found" });
+
+      // A new password saved for the item (the browser saw it change; the save
+      // itself is logged as item_updated): its open offboarding tasks are done.
+      if (action === "password_changed") {
+        if (access.permission !== "owner" && access.permission !== "edit") {
+          return res.status(403).json({ message: "You can't edit this item" });
+        }
+        const tasksDone = await OffboardingService.markPasswordChanged(noteId, userId);
+        return res.json({ tasksDone });
+      }
 
       await AuditService.record({
         actorId: userId,

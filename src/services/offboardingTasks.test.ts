@@ -45,12 +45,12 @@ afterEach(() => {
 });
 
 describe("isComplete", () => {
-  it("needs no open or failed task and no held key", () => {
-    expect(OffboardingService.isComplete({ ...zero, done: 3, not_required: 1 }, true)).toBe(true);
-    expect(OffboardingService.isComplete({ ...zero, done: 3, failed: 1 }, true)).toBe(false);
-    expect(OffboardingService.isComplete({ ...zero, pending: 1 }, true)).toBe(false);
-    expect(OffboardingService.isComplete({ ...zero, in_progress: 1 }, true)).toBe(false);
-    expect(OffboardingService.isComplete({ ...zero, done: 3 }, false)).toBe(false);
+  it("needs no open or failed task (keys are replaced in the background, apart from this)", () => {
+    expect(OffboardingService.isComplete({ ...zero, done: 3, not_required: 1 })).toBe(true);
+    expect(OffboardingService.isComplete(zero)).toBe(true);
+    expect(OffboardingService.isComplete({ ...zero, done: 3, failed: 1 })).toBe(false);
+    expect(OffboardingService.isComplete({ ...zero, pending: 1 })).toBe(false);
+    expect(OffboardingService.isComplete({ ...zero, in_progress: 1 })).toBe(false);
   });
 });
 
@@ -60,6 +60,12 @@ describe("keysRotated", () => {
     expect(CollectionKey.count).toHaveBeenCalledWith({ where: { userId: 3, collectionId: { [Op.in]: [1, 2] } } });
     vi.mocked(CollectionKey.count).mockResolvedValue(1 as never);
     expect(await OffboardingService.keysRotated(7, 3)).toBe(false);
+  });
+
+  it("is true once the person is an active member again: the keys they hold now are theirs", async () => {
+    vi.mocked(CompanyMember.findOne).mockResolvedValue({ id: 9, status: "active" } as never);
+    vi.mocked(CollectionKey.count).mockResolvedValue(1 as never);
+    expect(await OffboardingService.keysRotated(7, 3)).toBe(true);
   });
 });
 
@@ -115,7 +121,7 @@ describe("OffboardingService.updateTasks", () => {
     expect(err.status).toBe(403);
   });
 
-  it("completes the offboarding once everything is done and keys are gone", async () => {
+  it("completes the offboarding once every task is resolved", async () => {
     await OffboardingService.updateTasks(7, 1, 40, { taskIds: [1], status: "done" });
 
     expect(CompanyOffboarding.update).toHaveBeenCalledWith(
@@ -129,10 +135,15 @@ describe("OffboardingService.updateTasks", () => {
     expect(AuditService.record).toHaveBeenCalledWith(expect.objectContaining({ action: "offboarding_completed", companyId: 7 }));
   });
 
-  it("does not complete while a company collection key is still held", async () => {
+  it("completes while a company collection key is still held: replacing it doesn't hold the person's offboarding up", async () => {
     vi.mocked(CollectionKey.count).mockResolvedValue(1 as never);
-    await OffboardingService.updateTasks(7, 1, 40, { taskIds: [1], status: "done" });
-    expect(CompanyOffboarding.update).not.toHaveBeenCalled();
+    const result = await OffboardingService.updateTasks(7, 1, 40, { taskIds: [1], status: "done" });
+    expect(CompanyOffboarding.update).toHaveBeenCalledWith(
+      { status: "complete", completedAt: expect.any(Date) },
+      { where: { id: 40, status: "in_progress" }, transaction: TX }
+    );
+    // Still reported, for the "keys being replaced" note.
+    expect(result.offboarding.keysRotated).toBe(false);
   });
 
   it("completes exactly once when another check won the race", async () => {
@@ -156,7 +167,7 @@ describe("OffboardingService.completeOpenFor failures", () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     const second = { ...offboarding, id: 41, userId: 4 };
     vi.mocked(CompanyOffboarding.findAll).mockResolvedValue([offboarding, second] as never);
-    vi.mocked(CollectionKey.count).mockRejectedValueOnce(new Error("db down") as never);
+    vi.mocked(OffboardingTask.findAll).mockRejectedValueOnce(new Error("db down") as never);
 
     await OffboardingService.completeOpenFor(7, 1);
 
@@ -177,6 +188,54 @@ describe("OffboardingService.detail", () => {
 
   it("rejects an unknown status filter", async () => {
     expect((await failure(OffboardingService.detail(7, 1, 40, "nope"))).status).toBe(400);
+  });
+});
+
+describe("OffboardingService.markPasswordChanged", () => {
+  it("marks this item's open tasks of open offboardings done, records it, and completes the offboarding", async () => {
+    // The item's open tasks: one in offboarding 40 (open), one in 41 (already complete).
+    vi.mocked(OffboardingTask.findAll).mockResolvedValueOnce([{ offboardingId: 40 }, { offboardingId: 41 }] as never);
+    vi.mocked(CompanyOffboarding.findAll).mockResolvedValueOnce([offboarding] as never);
+    vi.mocked(OffboardingTask.update).mockResolvedValueOnce([1] as never);
+
+    const updated = await OffboardingService.markPasswordChanged(10, 5);
+
+    expect(updated).toBe(1);
+    expect(OffboardingTask.findAll).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { noteId: 10, status: { [Op.in]: ["pending", "in_progress"] } } })
+    );
+    expect(CompanyOffboarding.findAll).toHaveBeenCalledWith({ where: { id: { [Op.in]: [40, 41] }, status: "in_progress" } });
+    expect(OffboardingTask.update).toHaveBeenCalledWith(
+      { status: "done", actorId: 5, note: "Password changed in 2keevo" },
+      { where: { noteId: 10, offboardingId: { [Op.in]: [40] }, status: { [Op.in]: ["pending", "in_progress"] } } }
+    );
+    expect(AuditService.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        actorId: 5,
+        action: "offboarding_task_updated",
+        companyId: 7,
+        details: { offboardingId: 40, count: 1, status: "done", automatic: true },
+      })
+    );
+    // That was its last open task.
+    expect(CompanyOffboarding.update).toHaveBeenCalledWith(
+      { status: "complete", completedAt: expect.any(Date) },
+      { where: { id: 40, status: "in_progress" }, transaction: TX }
+    );
+  });
+
+  it("does nothing when the item has no open task", async () => {
+    vi.mocked(OffboardingTask.findAll).mockResolvedValueOnce([] as never);
+    expect(await OffboardingService.markPasswordChanged(10, 5)).toBe(0);
+    expect(OffboardingTask.update).not.toHaveBeenCalled();
+    expect(AuditService.record).not.toHaveBeenCalled();
+  });
+
+  it("leaves failed and resolved tasks alone (only open ones are matched)", async () => {
+    vi.mocked(OffboardingTask.findAll).mockResolvedValueOnce([{ offboardingId: 40 }] as never);
+    vi.mocked(CompanyOffboarding.findAll).mockResolvedValueOnce([] as never);
+    expect(await OffboardingService.markPasswordChanged(10, 5)).toBe(0);
+    expect(OffboardingTask.update).not.toHaveBeenCalled();
   });
 });
 

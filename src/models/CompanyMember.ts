@@ -13,13 +13,15 @@ interface CompanyMemberAttributes {
   status: MemberStatus;
   expiresAt?: Date | null;
   removedAt?: Date | null;
+  /** SHA-256 of the single-use token in the invite email; needed to accept. */
+  inviteTokenHash?: string | null;
   createdAt?: Date;
   updatedAt?: Date;
 }
 
 type CompanyMemberCreation = Optional<
   CompanyMemberAttributes,
-  "id" | "userId" | "status" | "expiresAt" | "removedAt" | "createdAt" | "updatedAt"
+  "id" | "userId" | "status" | "expiresAt" | "removedAt" | "inviteTokenHash" | "createdAt" | "updatedAt"
 >;
 
 class CompanyMember
@@ -34,6 +36,7 @@ class CompanyMember
   public status!: MemberStatus;
   public expiresAt?: Date | null;
   public removedAt?: Date | null;
+  public inviteTokenHash?: string | null;
   public readonly createdAt!: Date;
   public readonly updatedAt!: Date;
 }
@@ -72,6 +75,10 @@ CompanyMember.init(
     },
     removedAt: {
       type: DataTypes.DATE,
+      allowNull: true,
+    },
+    inviteTokenHash: {
+      type: DataTypes.STRING(64),
       allowNull: true,
     },
   },

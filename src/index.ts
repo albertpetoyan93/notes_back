@@ -3,7 +3,6 @@ import http from "http";
 import logger from "jet-logger";
 import sequelize from "./configs/DB/sequelize";
 import app from "./server";
-import socketService from "./services/SocketManager";
 import initializeDatabase from "./configs/DB/init";
 import { assertEncryptionReady } from "./util/encryption";
 import JobService from "./services/JobService";
@@ -17,9 +16,6 @@ const SERVER_START_MSG =
 
 export const server = http.createServer(app);
 
-// Initialize socket service
-socketService.initialize(server);
-
 async function start() {
   try {
     // Refuse to start without a usable ENCRYPTION_KEY in production.
@@ -28,10 +24,16 @@ async function start() {
     // Initialize database (setup associations and test connection)
     await initializeDatabase();
 
-    // Start HTTP server
-    server.listen(EnvVars.Port, () => {
-      logger.info(SERVER_START_MSG);
+    // Start HTTP server. Wait for the port: if it is taken, stop here (exit 1)
+    // instead of starting jobs and then shutting down as a "clean exit".
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(EnvVars.Port, () => {
+        server.off("error", reject);
+        resolve();
+      });
     });
+    logger.info(SERVER_START_MSG);
 
     logger.info("Enhanced DB polling system started");
 
@@ -42,8 +44,12 @@ async function start() {
 
     // Setup graceful shutdown
     setupGracefulShutdown();
-  } catch (error) {
-    logger.err("Failed to start server:", error);
+  } catch (error: any) {
+    if (error?.code === "EADDRINUSE") {
+      logger.err(`Failed to start server: port ${EnvVars.Port} is already in use (another backend still running?)`);
+    } else {
+      logger.err(`Failed to start server: ${error?.stack || error}`);
+    }
     process.exit(1);
   }
 }
@@ -52,7 +58,8 @@ async function start() {
  * Setup graceful shutdown handling
  */
 function setupGracefulShutdown(): void {
-  const shutdown = async (signal: string) => {
+  // A crash exits 1 so nodemon and process managers don't report it as a clean exit.
+  const shutdown = async (signal: string, exitCode = 0) => {
     logger.info(`Received ${signal}. Starting graceful shutdown...`);
 
     // Close HTTP server
@@ -64,7 +71,7 @@ function setupGracefulShutdown(): void {
         .close()
         .then(() => {
           logger.info("Database connection closed");
-          process.exit(0);
+          process.exit(exitCode);
         })
         .catch((error) => {
           logger.err("Error closing database connection:", error);
@@ -87,12 +94,12 @@ function setupGracefulShutdown(): void {
   // Handle uncaught exceptions
   process.on("uncaughtException", (error) => {
     logger.err(`Uncaught Exception: ${error.message}`);
-    shutdown("uncaughtException");
+    shutdown("uncaughtException", 1);
   });
 
   process.on("unhandledRejection", (reason, promise) => {
     logger.err(`Unhandled Rejection at: ${promise}, reason: ${reason}`);
-    shutdown("unhandledRejection");
+    shutdown("unhandledRejection", 1);
   });
 }
 

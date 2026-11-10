@@ -325,7 +325,7 @@ export default class CompanyController {
       const companyId = parseInt(req.params.id);
       if (!userId) return res.status(401).json({ message: "Unauthorized" });
       if (isNaN(companyId)) return res.status(400).json({ message: "Invalid company" });
-      res.json(await CompanyService.accept(companyId, userId));
+      res.json(await CompanyService.accept(companyId, userId, req.body?.token));
     } catch (error: any) {
       res.status(error.status || 500).json({
         message: error.status ? error.message : "Error accepting invite",

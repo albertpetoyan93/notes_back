@@ -112,9 +112,12 @@ export default class CollectionController {
       const removed = await CollectionService.remove(id, userId);
       if (!removed) return res.status(404).json({ message: "Collection not found" });
       res.json({ message: "Collection deleted" });
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error deleting collection:", error);
-      res.status(500).json({ message: "Error deleting collection" });
+      // A refusal with a reason (e.g. 409: it would strand company items) is passed on.
+      res.status(error.status || 500).json({
+        message: error.status ? error.message : "Error deleting collection",
+      });
     }
   };
 

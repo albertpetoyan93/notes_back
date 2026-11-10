@@ -16,6 +16,8 @@ import StripeService from "./StripeService";
 const CHUNK = 500;
 
 const PAGE = 100;
+// On a task the app marked done because the item's password was changed in 2keevo.
+const AUTO_DONE_NOTE = "Password changed in 2keevo";
 const STATUSES: TaskStatus[] = ["pending", "in_progress", "done", "not_required", "failed"];
 
 export type TaskCounts = Record<TaskStatus, number>;
@@ -99,7 +101,7 @@ class OffboardingService {
     });
     // A suspended member's seat stops being billed at the next renewal.
     StripeService.syncSeatsLater(companyId);
-    // Nothing to do (no tasks, no keys held): done at once.
+    // No tasks: done at once (keys they hold are replaced in the background).
     await this.completeQuietly(offboarding, managerId);
     return { offboardingId, created: true };
   }
@@ -119,12 +121,21 @@ class OffboardingService {
     return offboarding;
   }
 
-  /** Done when nothing is open or failed and the person holds no company collection key. */
-  isComplete(counts: TaskCounts, keysRotated: boolean): boolean {
-    return counts.pending === 0 && counts.in_progress === 0 && counts.failed === 0 && keysRotated;
+  /**
+   * Done when no task is open or failed. Their access stopped at removal; the
+   * collection keys they still hold are replaced in the background by an
+   * owner's or admin's browser (the "rotate" key task, which doesn't depend on
+   * the offboarding) and only reported (keysRotated), so the wait for a browser
+   * never holds the offboarding up.
+   */
+  isComplete(counts: TaskCounts): boolean {
+    return counts.pending === 0 && counts.in_progress === 0 && counts.failed === 0;
   }
 
+  /** No company collection key left to replace: none held, or they're a member again (it's theirs). */
   async keysRotated(companyId: number, userId: number): Promise<boolean> {
+    const member = await CompanyMember.findOne({ where: { companyId, userId }, attributes: ["id", "status"] });
+    if (member?.status === "active") return true;
     const collections = await Collection.findAll({ where: { companyId }, attributes: ["id"] });
     if (!collections.length) return true;
     const held = await CollectionKey.count({
@@ -254,6 +265,41 @@ class OffboardingService {
     return { updated, offboarding: await this.summary(fresh, counts) };
   }
 
+  /**
+   * Someone who may edit the item saved a new password for it in 2keevo
+   * (reported by their browser: the server can't read the item). Updating the
+   * stored password is the last step of changing it at the source, so the
+   * item's open tasks in open offboardings are marked done. Failed or already
+   * resolved tasks are left as they are. Returns how many tasks changed.
+   */
+  async markPasswordChanged(noteId: number, actorId: number) {
+    const open = ["pending", "in_progress"] as TaskStatus[];
+    const tasks = await OffboardingTask.findAll({
+      where: { noteId, status: { [Op.in]: open } },
+      attributes: ["offboardingId"],
+    });
+    const ids = [...new Set(tasks.map((task) => task.offboardingId))];
+    if (!ids.length) return 0;
+    const offboardings = await CompanyOffboarding.findAll({ where: { id: { [Op.in]: ids }, status: "in_progress" } });
+    if (!offboardings.length) return 0;
+    const [updated] = await OffboardingTask.update(
+      { status: "done", actorId, note: AUTO_DONE_NOTE },
+      { where: { noteId, offboardingId: { [Op.in]: offboardings.map((row) => row.id) }, status: { [Op.in]: open } } }
+    );
+    for (const offboarding of offboardings) {
+      await AuditService.record({
+        actorId,
+        action: "offboarding_task_updated",
+        companyId: offboarding.companyId,
+        targetUserId: offboarding.userId,
+        noteId,
+        details: { offboardingId: offboarding.id, count: updated, status: "done", automatic: true },
+      });
+      await this.completeQuietly(offboarding, actorId);
+    }
+    return updated;
+  }
+
   /** After a collection key was replaced: finish any open offboarding that is now done. */
   async completeOpenFor(companyId: number, actorId: number | null) {
     const open = await CompanyOffboarding.findAll({ where: { companyId, status: "in_progress" } });
@@ -280,7 +326,7 @@ class OffboardingService {
   private async completeIfDone(offboarding: CompanyOffboarding, actorId: number | null) {
     if (offboarding.status !== "in_progress") return false;
     const counts = (await this.countsFor([offboarding.id])).get(offboarding.id) as TaskCounts;
-    if (!this.isComplete(counts, await this.keysRotated(offboarding.companyId, offboarding.userId))) return false;
+    if (!this.isComplete(counts)) return false;
     const now = new Date();
     const won = await sequelize.transaction(async (transaction) => {
       // Two checks at once: only the one that flips in_progress completes it.
