@@ -15,13 +15,15 @@ interface CompanyMemberAttributes {
   removedAt?: Date | null;
   /** SHA-256 of the single-use token in the invite email; needed to accept. */
   inviteTokenHash?: string | null;
+  /** The invite link went to the invitee's inbox (so using it confirms the address, F15). */
+  inviteEmailed?: boolean;
   createdAt?: Date;
   updatedAt?: Date;
 }
 
 type CompanyMemberCreation = Optional<
   CompanyMemberAttributes,
-  "id" | "userId" | "status" | "expiresAt" | "removedAt" | "inviteTokenHash" | "createdAt" | "updatedAt"
+  "id" | "userId" | "status" | "expiresAt" | "removedAt" | "inviteTokenHash" | "inviteEmailed" | "createdAt" | "updatedAt"
 >;
 
 class CompanyMember
@@ -37,6 +39,7 @@ class CompanyMember
   public expiresAt?: Date | null;
   public removedAt?: Date | null;
   public inviteTokenHash?: string | null;
+  public inviteEmailed!: boolean;
   public readonly createdAt!: Date;
   public readonly updatedAt!: Date;
 }
@@ -77,6 +80,7 @@ CompanyMember.init(
       type: DataTypes.DATE,
       allowNull: true,
     },
+    inviteEmailed: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
     inviteTokenHash: {
       type: DataTypes.STRING(64),
       allowNull: true,

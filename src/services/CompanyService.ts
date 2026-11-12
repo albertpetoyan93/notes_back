@@ -1,8 +1,11 @@
+import CollectionService from "./CollectionService";
 import crypto from "crypto";
+import EmailVerificationService from "./EmailVerificationService";
 import { Op } from "sequelize";
 import sequelize from "../configs/DB/sequelize";
 import Company, { type CompanyPolicies } from "../models/Company";
 import CompanyMember, { CompanyRole } from "../models/CompanyMember";
+import { RecoveryCustodian } from "../models/CompanyRecovery";
 import User from "../models/User";
 import { formatCompanyName } from "../util/formatCompanyName";
 import CompanyBilling from "./CompanyBilling";
@@ -46,6 +49,8 @@ class CompanyService {
   async claimInvites(userId: number, email: string) {
     const normalized = email.trim().toLowerCase();
     if (!normalized) return;
+    // Only an account that proved it owns the address gets what was sent to it (F15).
+    if (!(await EmailVerificationService.isVerifiedId(userId))) return;
     await CompanyMember.update(
       { userId },
       {
@@ -171,6 +176,15 @@ class CompanyService {
       },
       order: [["createdAt", "ASC"]],
     });
+    // Whether each person has end-to-end encryption on (only they can receive vault keys).
+    const userIds = rows.map((member) => member.userId).filter((id): id is number => !!id);
+    const keyed = new Set(
+      userIds.length
+        ? (await User.findAll({ where: { id: { [Op.in]: userIds } }, attributes: ["id", "e2eEnabled"] }))
+            .filter((user) => user.e2eEnabled)
+            .map((user) => user.id)
+        : []
+    );
     return rows.map((member) => ({
       id: member.id,
       userId: member.userId ?? null,
@@ -178,6 +192,7 @@ class CompanyService {
       role: member.role,
       status: member.status,
       expiresAt: member.expiresAt ? member.expiresAt.toISOString() : null,
+      e2eEnabled: !!member.userId && keyed.has(member.userId),
     }));
   }
 
@@ -191,10 +206,8 @@ class CompanyService {
       throw Object.assign(new Error("You are already in this company"), { status: 400 });
     }
     const nextRole: CompanyRole = role === "admin" ? "admin" : "member";
-    const existingUser = await User.findOne({
-      where: { email: { [Op.iLike]: normalized } },
-      attributes: ["id", "email"],
-    });
+    // Tied to an account only once it confirmed the address; otherwise claimInvites (or the invite link) does it.
+    const existingUser = await EmailVerificationService.confirmedAccountByEmail(normalized, ["id", "email"]);
     const expiresAt = new Date(Date.now() + INVITE_MS);
     const existing = await CompanyMember.findOne({
       where: { companyId, email: normalized },
@@ -238,6 +251,7 @@ class CompanyService {
           userId: existing.userId || existingUser?.id || null,
           expiresAt,
           inviteTokenHash,
+          inviteEmailed: false,
         })
       : await CompanyMember.create({
           companyId,
@@ -247,6 +261,7 @@ class CompanyService {
           status: "invited",
           expiresAt,
           inviteTokenHash,
+          inviteEmailed: false,
         });
 
     const company = await Company.findByPk(companyId);
@@ -268,6 +283,7 @@ class CompanyService {
       else await member.destroy();
       throw error;
     }
+    if (emailSent) await CompanyMember.update({ inviteEmailed: true }, { where: { id: member.id } });
 
     return {
       id: member.id,
@@ -301,6 +317,12 @@ class CompanyService {
       throw Object.assign(new Error("That role cannot be changed"), { status: 400 });
     }
     await member.update({ role: nextRole });
+    // Custodians are owners/admins: a member is no longer one (made admin again, the owner chooses anew).
+    if (nextRole === "member" && member.userId) {
+      await RecoveryCustodian.destroy({ where: { companyId, userId: member.userId } });
+      // ADR-002: access kept "as admin" ends with the role (key tasks then replace the vault keys).
+      await CollectionService.dropLegacyGrants(companyId, member.userId);
+    }
     return { id: member.id, role: member.role };
   }
 
@@ -322,13 +344,19 @@ class CompanyService {
     if (actor.role === "admin" && member.role !== "member") {
       throw Object.assign(new Error("Only the owner can remove an admin"), { status: 403 });
     }
+    // Leaving ends their vault-recovery custody (once the removal went through; their key copy goes
+    // at the next key replacement).
+    const endCustody = () =>
+      member.userId ? RecoveryCustodian.destroy({ where: { companyId, userId: member.userId } }) : Promise.resolve(0);
     // Someone who could open company items is suspended and offboarded, not deleted.
     // A second removal (e.g. two managers at once) gets the open offboarding back.
     if (member.status === "active" || member.status === "suspended") {
       const { offboardingId, created } = await OffboardingService.start(companyId, userId, memberId);
+      await endCustody();
       return { ok: true, offboardingId, created };
     }
     await member.destroy();
+    await endCustody();
     if (member.userId) await GroupService.leaveCompany(companyId, member.userId);
     return { ok: true };
   }
@@ -336,6 +364,16 @@ class CompanyService {
   /** Join with the token from the invite email; it's cleared, so the link works once. */
   async accept(companyId: number, userId: number, token: unknown) {
     const user = await this.requireUser(userId);
+    if (!(await EmailVerificationService.isVerifiedId(userId))) {
+      // The invite link reached this address's inbox: that confirms the address.
+      const sent = await CompanyMember.findOne({
+        where: { companyId, email: user.email.trim().toLowerCase(), userId: { [Op.is]: null }, status: "invited" },
+      });
+      // Only a link that was emailed proves the inbox; one handed to the inviter (email off) doesn't.
+      if (sent?.inviteEmailed && sent.inviteTokenHash && inviteTokenMatches(token, sent.inviteTokenHash)) {
+        await EmailVerificationService.markVerified(user as User);
+      }
+    }
     await this.claimInvites(userId, user.email);
     const member = await this.openInvite(companyId, userId);
     if (!member.inviteTokenHash) {
@@ -345,6 +383,8 @@ class CompanyService {
       throw Object.assign(new Error("Open the link in your invitation email to join."), { status: 403 });
     }
     await member.update({ status: "active", expiresAt: null, inviteTokenHash: null });
+    // Back as a member (e.g. a former admin): grants they had as admin don't come back with them.
+    if (member.role === "member") await CollectionService.dropLegacyGrants(companyId, userId);
     // Accepted members are billed (pro rata); invited people never are.
     StripeService.syncSeatsLater(companyId);
     // The company's rules (e.g. require 2FA) apply from the first request.

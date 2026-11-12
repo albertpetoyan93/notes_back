@@ -84,6 +84,16 @@ export const AUDIT_ACTIONS = [
   "offboarding_started",
   "offboarding_completed",
   "offboarding_task_updated",
+  "recovery_settings_changed",
+  "recovery_custodians_changed",
+  "vault_recovery_requested",
+  "vault_recovery_approved",
+  "vault_recovery_cancelled",
+  "vault_recovery_completed",
+  "vault_recovery_copy_dropped",
+  "account_reset",
+  "vault_self_granted",
+  "vault_manager_changed",
   // Billing
   "trial_started",
   "family_invited",
@@ -348,7 +358,7 @@ class AuditService {
 
   /**
    * The company collections a member could open (direct shares, groups,
-   * everyone, or their owner/admin role). Null when the caller isn't a manager.
+   * everyone; not their role, ADR-002). Null when the caller isn't a manager.
    * Read before their groups are left, or the group access is gone.
    */
   async openableCollections(companyId: number, managerId: number, memberUserId: number) {
@@ -371,11 +381,6 @@ class AuditService {
     const shareByCollection = new Map(
       shares.map((share) => [share.collectionId, share.permission])
     );
-    const member = await CompanyMember.findOne({
-      where: { companyId, userId: memberUserId },
-      attributes: ["role"],
-    });
-    const manager = member?.role === "owner" || member?.role === "admin";
     const viaGroups = await GroupService.forUser(memberUserId, collections.map((item) => item.id));
     const best = (...values: (string | null | undefined)[]) =>
       values.includes("edit") ? "edit" : values.includes("view") ? "view" : null;
@@ -384,9 +389,8 @@ class AuditService {
         id: collection.id,
         // Empty while encrypted: the app fills in the name it can open.
         name: collection.encName ? "" : collection.name,
-        permission: manager
-          ? "edit"
-          : best(shareByCollection.get(collection.id), collection.companyShare, viaGroups.get(collection.id)),
+        // ADR-002: owners and admins too open only what they were granted.
+        permission: best(shareByCollection.get(collection.id), collection.companyShare, viaGroups.get(collection.id)),
       }))
       .filter((collection) => collection.permission);
     return accessible;

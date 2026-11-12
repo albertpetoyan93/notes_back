@@ -29,6 +29,8 @@ interface CompanyAttributes {
   /** Admin recovery (migration 040): the company's recovery public key and its version, while on. */
   recoveryPublicKey?: string | null;
   recoveryKeyVersion?: number | null;
+  /** Vault recovery (migration 051): hours between a recovery's approval and when it can run. */
+  recoveryWaitHours?: number;
   /** 50% off Team (migration 041), once 2keevo approved a request. */
   discount?: "nonprofit" | "school" | null;
   createdAt?: Date;
@@ -37,7 +39,7 @@ interface CompanyAttributes {
 
 type CompanyCreation = Optional<
   CompanyAttributes,
-  "id" | "status" | "policies" | "suspendedAt" | "removalWarnings" | "markedForRemovalAt" | "recoveryPublicKey" | "recoveryKeyVersion" | "discount" | "createdAt" | "updatedAt"
+  "id" | "status" | "policies" | "suspendedAt" | "removalWarnings" | "markedForRemovalAt" | "recoveryPublicKey" | "recoveryKeyVersion" | "recoveryWaitHours" | "discount" | "createdAt" | "updatedAt"
 >;
 
 class Company extends Model<CompanyAttributes, CompanyCreation> implements CompanyAttributes {
@@ -50,6 +52,7 @@ class Company extends Model<CompanyAttributes, CompanyCreation> implements Compa
   public markedForRemovalAt?: Date | null;
   public recoveryPublicKey?: string | null;
   public recoveryKeyVersion?: number | null;
+  public recoveryWaitHours!: number;
   public discount?: "nonprofit" | "school" | null;
   public readonly createdAt!: Date;
   public readonly updatedAt!: Date;
@@ -81,6 +84,7 @@ Company.init(
     markedForRemovalAt: { type: DataTypes.DATE, allowNull: true },
     recoveryPublicKey: { type: DataTypes.STRING(64), allowNull: true },
     recoveryKeyVersion: { type: DataTypes.INTEGER, allowNull: true },
+    recoveryWaitHours: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 24 },
     discount: { type: DataTypes.STRING(16), allowNull: true },
   },
   {

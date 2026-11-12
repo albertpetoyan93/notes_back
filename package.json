@@ -19,7 +19,9 @@
     "e2e:status": "cross-env NODE_ENV=development npx ts-node -r ./preload.js ./src/scripts/e2eStatus.ts",
     "e2e:remind": "cross-env NODE_ENV=development npx ts-node -r ./preload.js ./src/scripts/e2eStatus.ts --remind",
     "e2e:status:prod": "NODE_ENV=production node -r ./preload.js ./dist/scripts/e2eStatus.js",
-    "e2e:remind:prod": "NODE_ENV=production node -r ./preload.js ./dist/scripts/e2eStatus.js --remind"
+    "e2e:remind:prod": "NODE_ENV=production node -r ./preload.js ./dist/scripts/e2eStatus.js --remind",
+    "recovery:leftovers": "cross-env NODE_ENV=development npx ts-node -r ./preload.js ./src/scripts/adminResetLeftovers.ts",
+    "recovery:leftovers:prod": "NODE_ENV=production node -r ./preload.js ./dist/scripts/adminResetLeftovers.js"
   },
   "engines": {
     "node": ">=16.0.0"

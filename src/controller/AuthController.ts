@@ -3,6 +3,7 @@ import HttpStatusCodes from "../common/HttpStatusCodes";
 import AuthService, { E2E_REQUIRED, MASTER_RESET_REFUSED } from "../services/AuthService";
 import { AuthRequest } from "@src/types";
 import UserService from "@src/services/UserService";
+import EmailVerificationService from "@src/services/EmailVerificationService";
 import { clearAuthCookies, setAuthCookies } from "@src/util/authCookies";
 import User from "@src/models/User";
 import SessionService, { RefreshError, SessionMeta } from "@src/services/SessionService";
@@ -577,6 +578,33 @@ export default class AuthController {
     }
   }
 
+  /** Public: the link from the confirmation email (the token decides which account). */
+  static confirmEmail = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      res.status(HttpStatusCodes.OK).send(await EmailVerificationService.confirm(req.body?.token));
+    } catch (e: any) {
+      if (e?.status) {
+        res.status(e.status).send({ message: e.message });
+        return;
+      }
+      next(e);
+    }
+  };
+
+  /** Signed in: send a new confirmation link. */
+  static resendEmailConfirmation = async (req: AuthRequest, res: Response, next: NextFunction) => {
+    try {
+      await EmailVerificationService.resend(Number(req.user?.id));
+      res.status(HttpStatusCodes.OK).send({ ok: true });
+    } catch (e: any) {
+      if (e?.status) {
+        res.status(e.status).send({ message: e.message });
+        return;
+      }
+      next(e);
+    }
+  };
+
   static me = async (req: AuthRequest, res: Response, next: NextFunction) => {
     // #swagger.tags = ["Auth"]
     /* #swagger.security = [{
@@ -612,6 +640,8 @@ export default class AuthController {
           rules
         ),
         autoLockLimit: rules.maxIdleMinutes,
+        // Not confirmed yet: invites and shares to this address wait (and the app asks to confirm).
+        emailVerified: !!user.emailVerifiedAt,
         locked: Boolean((req.user as { locked?: boolean } | undefined)?.locked),
         // Accounts without end-to-end encryption must turn it on by then (E2E_DEADLINE).
         ...(!user.e2eEnabled && e2eDeadline() ? { e2eDeadline: e2eDeadline() } : {}),

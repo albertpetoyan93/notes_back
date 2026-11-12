@@ -2,6 +2,7 @@ import User from "../models/User";
 import UserPasskey from "../models/UserPasskey";
 import CompanyService from "./CompanyService";
 import EmailService from "./EmailService";
+import EmailVerificationService from "./EmailVerificationService";
 import FamilyService from "./FamilyService";
 import logger from "jet-logger";
 import { Op } from "sequelize";
@@ -63,8 +64,10 @@ class AuthService {
       ...(data.e2e ? { ...data.e2e, e2eEnabled: true, e2eSince: new Date() } : {}),
     });
 
+    // Address-based invites wait until the address is confirmed (claimInvites checks it).
     await CompanyService.claimInvites(user.id, user.email);
     await FamilyService.claimInvites(user.id, user.email);
+    await EmailVerificationService.issue(user);
 
     return user;
   }
@@ -157,21 +160,10 @@ class AuthService {
     if (!normalized) return RESET_MESSAGE;
 
     const user = await User.findOne({
-      where: { email: { [Op.iLike]: normalized } },
+      // Escaped: a % or _ typed in the email must not match someone else's address.
+      where: { email: { [Op.iLike]: normalized.replace(/[\\%_]/g, "\\$&") } },
     });
     if (!user) return RESET_MESSAGE;
-
-    // A master password can't be reset by email: the server can't open the
-    // vault, and the old keys would be lost. The email says what does work.
-    if (user.e2eEnabled) {
-      try {
-        if (EmailService.isConfigured()) await EmailService.sendMasterPasswordHelp({ to: user.email });
-        else logger.info(`Password reset asked for ${user.email}, an end-to-end account: no link sent.`);
-      } catch (error) {
-        logger.err(error, true);
-      }
-      return RESET_MESSAGE;
-    }
 
     const token = crypto.randomBytes(32).toString("hex");
     const passwordResetTokenHash = crypto
@@ -179,6 +171,24 @@ class AuthService {
       .update(token)
       .digest("hex");
     const passwordResetExpires = new Date(Date.now() + 60 * 60 * 1000);
+
+    // A master password can't be reset by email: the server can't open the
+    // vault. The email says to use the recovery key; without it, the link
+    // resets the account (AccountResetService: personal items are lost).
+    if (user.e2eEnabled) {
+      await user.update({ passwordResetTokenHash, passwordResetExpires });
+      try {
+        if (EmailService.isConfigured()) await EmailService.sendAccountResetLink({ to: user.email, token });
+        else {
+          const origin = EnvVars.FrontendOrigin || "http://localhost:5173";
+          logger.info(`Account reset link for ${user.email}: ${origin}/auth/reset-account?token=${token}`);
+        }
+      } catch (error) {
+        logger.err(error, true);
+      }
+      return RESET_MESSAGE;
+    }
+
     await user.update({ passwordResetTokenHash, passwordResetExpires });
 
     if (!EmailService.isConfigured()) {
@@ -239,6 +249,8 @@ class AuthService {
       passwordResetTokenHash: null,
       passwordResetExpires: null,
     });
+    // The link reached this inbox: that confirms the address.
+    await EmailVerificationService.markVerified(user);
     // Passkey unlock copies of the old user key go with it.
     await UserPasskey.update({ prfUserKey: null }, { where: { userId: user.id } });
     await SessionService.revokeAll(user.id);

@@ -2,7 +2,6 @@ import bcrypt from "bcrypt";
 import crypto from "crypto";
 import EnvVars from "../common/EnvVars";
 import CollectionKey from "../models/CollectionKey";
-import { MemberRecovery } from "../models/CompanyRecovery";
 import ItemKey from "../models/ItemKey";
 import User from "../models/User";
 import UserPasskey from "../models/UserPasskey";
@@ -174,13 +173,13 @@ class E2EAccountService {
   async enable(user: User, input: any) {
     await this.checkPasswordForEnable(user, input?.password);
     const values = await this.checkedBundle(input);
-    await user.update({ ...values, e2eEnabled: true, e2eSince: new Date() });
+    // A reset link emailed before this would now reset the end-to-end account: it stops working.
+    await user.update({ ...values, e2eEnabled: true, e2eSince: new Date(), passwordResetTokenHash: null, passwordResetExpires: null });
     // New keys: copies made for any earlier ones can't be opened. Without them,
-    // the key tasks make new ones (shares, collection keys, company recovery).
+    // the key tasks make new ones (shares, collection keys).
     await UserPasskey.update({ prfUserKey: null }, { where: { userId: user.id } });
     await CollectionKey.destroy({ where: { userId: user.id } });
     await ItemKey.destroy({ where: { containerType: "user", containerId: user.id } });
-    await MemberRecovery.destroy({ where: { userId: user.id } });
   }
 
   private async proveMasterPassword(user: User, authKey: unknown) {
@@ -203,23 +202,6 @@ class E2EAccountService {
     });
     // Other devices signed in with the old password sign in again.
     await SessionService.revokeAll(user.id, sessionId);
-  }
-
-  /**
-   * A company admin reset this member's master password (admin recovery): the
-   * user key, opened in the admin's browser, locked again with a temporary
-   * master password. The member must choose their own at next sign-in.
-   */
-  async resetByCompany(user: User, input: any) {
-    if (!user.e2eEnabled) throw new E2EError("End-to-end encryption isn't on for this person.");
-    await user.update({
-      kdfParams: checkKdf(input?.kdf),
-      kdfSalt: checkSalt(input?.kdf?.salt),
-      password: checkSecret(input?.authKey, "sign-in key"),
-      protectedUserKey: checkWrapped(input?.protectedUserKey, "vault key"),
-      mustChangeMasterPassword: true,
-    });
-    await SessionService.revokeAll(user.id);
   }
 
   /** A new recovery key replaces the old one, which stops working. */
@@ -256,6 +238,9 @@ class E2EAccountService {
       kdfSalt: checkSalt(input?.kdf?.salt),
       password: checkSecret(input?.authKey, "sign-in key"),
       protectedUserKey: checkWrapped(input?.protectedUserKey, "vault key"),
+      // Back in with the recovery key: an emailed account-reset link isn't needed any more.
+      passwordResetTokenHash: null,
+      passwordResetExpires: null,
     });
     await SessionService.revokeAll(user.id);
     return user;

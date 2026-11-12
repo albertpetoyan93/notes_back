@@ -230,7 +230,8 @@ class E2EItemService {
           const everyone = collection.companyShare === "view" || collection.companyShare === "edit";
           for (const member of companyMembers.filter((row) => row.companyId === collection.companyId)) {
             const userId = member.userId as number;
-            if (member.role !== "member" || everyone || sharedWith.includes(userId) || viaGroups.get(collection.id)?.has(userId)) {
+            // ADR-002: the role gives no access; owners and admins count through grants.
+            if (everyone || sharedWith.includes(userId) || viaGroups.get(collection.id)?.has(userId)) {
               people.add(userId);
             }
           }
@@ -1034,22 +1035,35 @@ class E2EItemService {
   // ---------------------------------------------------------------- background work for owners and admins
 
   /** Collections this person manages: their own, and every collection of companies they own or administer. */
+  /**
+   * Collections whose keys this person's browser hands on: their personal
+   * ones, and company vaults they manage (an active share with "manages", in
+   * an active company where they're an active member). ADR-002: not by role.
+   */
   private async managedCollections(userId: number) {
-    const roles = await CompanyMember.findAll({
-      where: { userId, status: "active", role: { [Op.in]: ["owner", "admin"] } },
+    const memberships = await CompanyMember.findAll({
+      where: { userId, status: "active" },
       attributes: ["companyId"],
     });
-    const companyIds = roles.map((row) => row.companyId);
+    const companyIds = memberships.map((row) => row.companyId);
     const activeCompanies = companyIds.length
       ? (await Company.findAll({ where: { id: { [Op.in]: companyIds }, status: "active" }, attributes: ["id"] })).map(
           (company) => company.id
         )
       : [];
+    const managing = activeCompanies.length
+      ? (
+          await CollectionShare.findAll({
+            where: { sharedWithUserId: userId, manages: true, ...activeShare() },
+            attributes: ["collectionId"],
+          })
+        ).map((share) => share.collectionId)
+      : [];
     return Collection.findAll({
       where: {
         [Op.or]: [
           { userId, companyId: null },
-          ...(activeCompanies.length ? [{ companyId: { [Op.in]: activeCompanies } }] : []),
+          ...(managing.length ? [{ id: { [Op.in]: managing }, companyId: { [Op.in]: activeCompanies } }] : []),
         ],
       },
       attributes: ["id", "name", "userId", "companyId", "e2eKeyVersion", "encName", "nameKey"],

@@ -203,7 +203,8 @@ export default class CompanyController {
         userId,
         req.body?.audience || "",
         req.body?.permission || "view",
-        emails
+        emails,
+        typeof req.body?.manages === "boolean" ? req.body.manages : undefined
       );
       await AuditService.record({
         actorId: userId,
@@ -222,6 +223,37 @@ export default class CompanyController {
       res.status(error.status || 500).json({
         message: error.status ? error.message : "Error sharing collection",
       });
+    }
+  };
+
+  /** An owner or admin gives themselves access to a vault (ADR-002): logged, managers told. */
+  static selfGrantCollection = async (req: any, res: Response) => {
+    try {
+      const userId = req.user?.id;
+      const companyId = parseInt(req.params.id);
+      const collectionId = parseInt(req.params.collectionId);
+      if (!userId) return res.status(401).json({ message: "Unauthorized" });
+      if (isNaN(companyId) || isNaN(collectionId)) return res.status(400).json({ message: "Invalid company" });
+      res.json(await CollectionService.selfGrant(companyId, collectionId, userId, req.body?.permission || "view"));
+    } catch (error: any) {
+      res.status(error.status || 500).json({ message: error.status ? error.message : "Could not give access" });
+    }
+  };
+
+  /** Make someone a vault manager, or stop it (never the last one). */
+  static setCollectionManager = async (req: any, res: Response) => {
+    try {
+      const userId = req.user?.id;
+      const companyId = parseInt(req.params.id);
+      const collectionId = parseInt(req.params.collectionId);
+      const targetUserId = parseInt(req.params.userId);
+      if (!userId) return res.status(401).json({ message: "Unauthorized" });
+      if ([companyId, collectionId, targetUserId].some((value) => isNaN(value))) {
+        return res.status(400).json({ message: "Invalid request" });
+      }
+      res.json(await CollectionService.setManager(companyId, collectionId, userId, targetUserId, req.body?.manages === true));
+    } catch (error: any) {
+      res.status(error.status || 500).json({ message: error.status ? error.message : "Could not change the manager" });
     }
   };
 

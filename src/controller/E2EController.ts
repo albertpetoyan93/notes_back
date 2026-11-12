@@ -1,6 +1,7 @@
 import { NextFunction, Request, Response } from "express";
 import HttpStatusCodes from "../common/HttpStatusCodes";
 import User from "../models/User";
+import AccountResetService from "../services/AccountResetService";
 import AuditService from "../services/AuditService";
 import E2EAccountService, { E2EError } from "../services/E2EAccountService";
 import EmailService from "../services/EmailService";
@@ -41,6 +42,24 @@ export default class E2EController {
       const user = await signedInUser(req, res);
       if (!user) return;
       res.send({ keys: E2EAccountService.bundle(user) });
+    } catch (error) {
+      fail(error, res, next);
+    }
+  };
+
+  /** Public: what an account reset link would delete (AccountResetService). */
+  static resetAccountCheck = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      res.send(await AccountResetService.check(req.body?.token));
+    } catch (error) {
+      fail(error, res, next);
+    }
+  };
+
+  /** Public: reset the account with the link's token, new keys made in the browser. */
+  static resetAccount = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      res.send(await AccountResetService.reset(req.body?.token, req.body));
     } catch (error) {
       fail(error, res, next);
     }

@@ -171,14 +171,8 @@ class AccessService {
             );
             const group = viaGroups.get(collection.id)?.get(member.userId) || null;
             const options = [share?.permission, collection.companyShare, group];
-            const permission =
-              role !== "member"
-                ? "edit"
-                : options.includes("edit")
-                  ? "edit"
-                  : options.includes("view")
-                    ? "view"
-                    : null;
+            // ADR-002: the role gives no access; owners and admins count through grants.
+            const permission = options.includes("edit") ? "edit" : options.includes("view") ? "view" : null;
             if (!permission) continue;
             add(member.userId, {
               type: "company",
@@ -186,8 +180,8 @@ class AccessService {
               collectionName: collectionLabel(collection),
               permission,
               role,
-              everyone: role === "member" && !share && !group && !!collection.companyShare,
-              group: role === "member" && !share && !!group,
+              everyone: !share && !group && !!collection.companyShare,
+              group: !share && !!group,
             });
           }
         }

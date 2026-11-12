@@ -8,6 +8,7 @@ import { assertEncryptionReady } from "./util/encryption";
 import JobService from "./services/JobService";
 import { registerBillingJobs } from "./services/BillingJobs";
 import { registerAnalyticsJobs } from "./services/AnalyticsJobs";
+import { registerEmailVerificationJobs } from "./services/EmailVerificationJobs";
 
 // **** Run **** //
 
@@ -40,6 +41,7 @@ async function start() {
     // Daily jobs (trial reminders and expiry), once a day, never twice.
     registerBillingJobs();
     registerAnalyticsJobs();
+    registerEmailVerificationJobs();
     JobService.start();
 
     // Setup graceful shutdown

@@ -427,7 +427,8 @@ describe("deleting a company collection", () => {
 
   beforeEach(() => {
     collection = { id: 1, companyId: 7, destroy: vi.fn() };
-    vi.spyOn(CollectionService, "getAccess").mockResolvedValue({ collection, permission: "owner" } as never);
+    // ADR-002: deleting a company vault is managing it (owners and admins), not opening it.
+    vi.spyOn(CollectionService as any, "administers").mockResolvedValue({ collection });
     vi.spyOn(CollectionNote, "findAll").mockResolvedValue([{ noteId: 5 }] as never);
     vi.spyOn(Note, "findAll").mockResolvedValue([{ id: 5 }] as never);
     vi.spyOn(CollectionNote, "destroy").mockResolvedValue(1 as never);

@@ -4,6 +4,7 @@ import Company from "@src/models/Company";
 import CompanyMember from "@src/models/CompanyMember";
 import User from "@src/models/User";
 import CompanyPolicyService from "@src/services/CompanyPolicyService";
+import CollectionService from "@src/services/CollectionService";
 import CompanyService from "@src/services/CompanyService";
 import EmailService from "@src/services/EmailService";
 import StripeService from "@src/services/StripeService";
@@ -22,7 +23,7 @@ async function failure(promise: Promise<unknown>) {
 const company = { id: 7, name: "Acme", status: "active", policies: {}, update: vi.fn() };
 
 beforeEach(() => {
-  vi.spyOn(User, "findByPk").mockResolvedValue({ id: 1, email: "boss@acme.com" } as never);
+  vi.spyOn(User, "findByPk").mockResolvedValue({ id: 1, email: "boss@acme.com", emailVerifiedAt: new Date("2026-01-01") } as never);
   vi.spyOn(Company, "findByPk").mockResolvedValue(company as never);
   vi.spyOn(CompanyMember, "update").mockResolvedValue([0] as never);
   vi.spyOn(StripeService, "syncSeatsLater").mockImplementation(() => undefined as never);
@@ -96,6 +97,8 @@ describe("CompanyService.accept: only with the emailed token", () => {
       update: vi.fn(async (values: any) => Object.assign(member, values)),
     };
     vi.spyOn(CompanyMember, "findOne").mockResolvedValue(member as never);
+    // ADR-002: joining as a member drops admin-era grants (covered in vaultGrantRules.test).
+    vi.spyOn(CollectionService, "dropLegacyGrants").mockResolvedValue(0 as never);
   });
 
   it("joins with the right token, and the token can't be used again", async () => {

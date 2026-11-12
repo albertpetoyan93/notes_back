@@ -25,7 +25,7 @@ describe("StaffService.roleOf", () => {
   });
 
   it("is admin for an ADMIN_EMAILS user with no row", async () => {
-    user.findByPk.mockResolvedValue({ email: "Boss@X.com" } as never);
+    user.findByPk.mockResolvedValue({ email: "Boss@X.com", emailVerifiedAt: new Date("2026-01-01") } as never);
     staff.findByPk.mockResolvedValue(null as never);
     expect(await StaffService.roleOf(2)).toBe("admin");
   });

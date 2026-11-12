@@ -1,4 +1,5 @@
 import { Op } from "sequelize";
+import EmailVerificationService from "./EmailVerificationService";
 import { EMERGENCY_MAX_CONTACTS, EMERGENCY_WAIT_DAYS } from "../common/plans";
 import Collection from "../models/Collection";
 import CollectionKey from "../models/CollectionKey";
@@ -45,6 +46,8 @@ class EmergencyAccessService {
   async claimInvites(userId: number, email: string) {
     const normalized = email.trim().toLowerCase();
     if (!normalized) return;
+    // Only an account that proved it owns the address gets what was sent to it (F15).
+    if (!(await EmailVerificationService.isVerifiedId(userId))) return;
     await EmergencyContact.update(
       { contactId: userId },
       { where: { email: normalized, contactId: { [Op.is]: null }, grantorId: { [Op.ne]: userId } } }
@@ -128,7 +131,8 @@ class EmergencyAccessService {
       throw new EmergencyError(`You can have up to ${EMERGENCY_MAX_CONTACTS} trusted contacts.`);
     }
 
-    const account = await User.findOne({ where: { email: { [Op.iLike]: email } }, attributes: ["id"] });
+    // Tied to an account only once it confirmed the address; otherwise claimInvites ties it after confirming.
+    const account = await EmailVerificationService.confirmedAccountByEmail(email, ["id"]);
     const row = await EmergencyContact.create({ grantorId, email, contactId: account?.id ?? null, waitDays, status: "invited" });
 
     let emailSent = false;
@@ -200,6 +204,9 @@ class EmergencyAccessService {
   async accept(contactId: number, id: number) {
     const row = await this.contactRow(contactId, id);
     if (row.status !== "invited") throw new EmergencyError("This invitation was already answered.", 409);
+    if (!(await EmailVerificationService.isVerifiedId(contactId))) {
+      throw new EmergencyError("Confirm your email first: open the link we sent you.", 403);
+    }
     const contact = await User.findByPk(contactId, { attributes: ["e2eEnabled", "fullName", "username", "email"] });
     if (!contact?.e2eEnabled) throw new EmergencyError("Turn on end-to-end encryption first.", 409);
     await row.update({ status: "accepted" });

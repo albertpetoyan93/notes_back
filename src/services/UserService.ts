@@ -18,6 +18,7 @@ class UserService {
         "extensionAutoLockMinutes",
         "e2eEnabled",
         "mustChangeMasterPassword",
+        "emailVerifiedAt",
         "e2eSince",
         "publicKey",
         "createdAt",
@@ -57,6 +58,8 @@ class UserService {
     return User.findAll({
       where: {
         id: ids ? { [Op.in]: ids } : { [Op.ne]: excludeUserId },
+        // Unconfirmed accounts can't be found by an address they may not own (F15).
+        emailVerifiedAt: { [Op.not]: null },
         [Op.or]: [
           { email: { [Op.iLike]: `%${q}%` } },
           { username: { [Op.iLike]: `%${q}%` } },

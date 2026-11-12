@@ -9,24 +9,34 @@ const router = Router();
 router.use(isAuth);
 router.get("/", CompanyController.list as RequestHandler);
 router.post("/", CompanyController.create as RequestHandler);
-// Admin recovery: background work for this person's browser (before "/:id").
+// Vault recovery: background work for this person's browser (before "/:id").
 router.get("/recovery/tasks", CompanyRecoveryController.tasks as RequestHandler);
-router.post("/recovery/enroll", CompanyRecoveryController.enroll as RequestHandler);
 router.post("/recovery/grant", CompanyRecoveryController.grant as RequestHandler);
 router.post("/recovery/rotate", CompanyRecoveryController.rotate as RequestHandler);
+router.post("/recovery/continuity", CompanyRecoveryController.continuity as RequestHandler);
 router.put("/:id", CompanyController.rename as RequestHandler);
-// Admin recovery for one company: status, on/off (owner), resetting a member (owners and admins).
+// Vault recovery for one company: status, on/off and settings (owner).
 router.get("/:id/recovery", CompanyRecoveryController.status as RequestHandler);
 router.post("/:id/recovery/enable", CompanyRecoveryController.enable as RequestHandler);
 router.post("/:id/recovery/disable", CompanyRecoveryController.disable as RequestHandler);
-router.get("/:id/recovery/members/:userId", CompanyRecoveryController.memberKeys as RequestHandler);
-router.post("/:id/recovery/members/:userId", CompanyRecoveryController.reset as RequestHandler);
+router.put("/:id/recovery/settings", CompanyRecoveryController.settings as RequestHandler);
+// Recovery requests: ask (owners/admins), approve (another custodian), cancel, then complete (a custodian, after the wait).
+router.get("/:id/recovery/requests", CompanyRecoveryController.requests as RequestHandler);
+router.post("/:id/recovery/requests", CompanyRecoveryController.createRequest as RequestHandler);
+router.post("/:id/recovery/requests/:requestId/approve", CompanyRecoveryController.approveRequest as RequestHandler);
+router.post("/:id/recovery/requests/:requestId/cancel", CompanyRecoveryController.cancelRequest as RequestHandler);
+router.get("/:id/recovery/requests/:requestId/material", CompanyRecoveryController.material as RequestHandler);
+router.post("/:id/recovery/requests/:requestId/complete", CompanyRecoveryController.completeRequest as RequestHandler);
+router.delete("/:id/recovery/requests/:requestId/copy", CompanyRecoveryController.dropCopy as RequestHandler);
 // Security policies: owners and admins.
 router.get("/:id/policies", CompanyController.policies as RequestHandler);
 router.put("/:id/policies", CompanyController.updatePolicies as RequestHandler);
 router.get("/:id/collections", CompanyController.collections as RequestHandler);
 router.post("/:id/collections", CompanyController.createCollection as RequestHandler);
 router.post("/:id/collections/:collectionId/share", CompanyController.shareCollection as RequestHandler);
+// ADR-002: an owner/admin gives themselves access (logged); vault managers are set per person.
+router.post("/:id/collections/:collectionId/self-grant", CompanyController.selfGrantCollection as RequestHandler);
+router.put("/:id/collections/:collectionId/managers/:userId", CompanyController.setCollectionManager as RequestHandler);
 router.delete(
   "/:id/collections/:collectionId/share",
   CompanyController.unshareCollection as RequestHandler

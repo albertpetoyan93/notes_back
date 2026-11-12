@@ -9,6 +9,7 @@ import CollectionShare from "@src/models/CollectionShare";
 import Company from "@src/models/Company";
 import CompanyMember from "@src/models/CompanyMember";
 import CompanyOffboarding from "@src/models/CompanyOffboarding";
+import { RecoveryCustodian } from "@src/models/CompanyRecovery";
 import Note from "@src/models/Note";
 import NoteShare from "@src/models/NoteShare";
 import OffboardingTask from "@src/models/OffboardingTask";
@@ -34,6 +35,8 @@ async function failure(promise: Promise<unknown>) {
 }
 
 beforeEach(() => {
+  // Removing someone also ends any vault-recovery custody they had.
+  vi.spyOn(RecoveryCustodian, "destroy").mockResolvedValue(0 as never);
   member = { id: 20, companyId: 7, userId: 3, email: "sam@example.com", role: "member", status: "active" };
   member.update = vi.fn(async (fields: Record<string, unknown>) => Object.assign(member, fields));
   member.destroy = vi.fn();
@@ -213,6 +216,8 @@ describe("CollectionService.noteIdsForCollections", () => {
 describe("CompanyService.members", () => {
   it("lists suspended members, so managers see who is being offboarded", async () => {
     vi.spyOn(User, "findByPk").mockResolvedValue({ id: 1, email: "boss@example.com" } as never);
+    // Who has end-to-end encryption on (members() reports it).
+    vi.spyOn(User, "findAll").mockResolvedValue([{ id: 3, e2eEnabled: true }] as never);
     vi.spyOn(Company, "findByPk").mockResolvedValue({ id: 7, status: "active" } as never);
     vi.mocked(CompanyMember.findOne).mockResolvedValue({ role: "owner" } as never);
     const rows = [

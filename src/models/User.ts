@@ -25,6 +25,10 @@ interface UserAttributes {
   e2eSince?: Date | null;
   /** A company admin set a temporary master password: the person chooses their own at next sign-in. */
   mustChangeMasterPassword?: boolean;
+  /** When the email address was confirmed (migration 054); null = not yet. */
+  emailVerifiedAt?: Date | null;
+  emailVerifyTokenHash?: string | null;
+  emailVerifyExpires?: Date | null;
   kdfSalt?: string | null;
   kdfParams?: { algorithm: "argon2id"; memory: number; iterations: number; parallelism: number } | null;
   protectedUserKey?: string | null;
@@ -56,6 +60,9 @@ interface UserCreationAttributes
     | "e2eEnabled"
     | "e2eSince"
     | "mustChangeMasterPassword"
+    | "emailVerifiedAt"
+    | "emailVerifyTokenHash"
+    | "emailVerifyExpires"
     | "kdfSalt"
     | "kdfParams"
     | "protectedUserKey"
@@ -90,6 +97,9 @@ class User
   public e2eEnabled!: boolean;
   public e2eSince?: Date | null;
   public mustChangeMasterPassword!: boolean;
+  public emailVerifiedAt?: Date | null;
+  public emailVerifyTokenHash?: string | null;
+  public emailVerifyExpires?: Date | null;
   public kdfSalt?: string | null;
   public kdfParams?: UserAttributes["kdfParams"];
   public protectedUserKey?: string | null;
@@ -169,6 +179,9 @@ User.init(
     e2eEnabled: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
     e2eSince: { type: DataTypes.DATE, allowNull: true },
     mustChangeMasterPassword: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+    emailVerifiedAt: { type: DataTypes.DATE, allowNull: true },
+    emailVerifyTokenHash: { type: DataTypes.STRING(64), allowNull: true },
+    emailVerifyExpires: { type: DataTypes.DATE, allowNull: true },
     kdfSalt: { type: DataTypes.STRING(64), allowNull: true },
     kdfParams: { type: DataTypes.JSONB, allowNull: true },
     protectedUserKey: { type: DataTypes.TEXT, allowNull: true },

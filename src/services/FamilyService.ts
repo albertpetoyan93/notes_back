@@ -1,4 +1,5 @@
 import { Op, UniqueConstraintError } from "sequelize";
+import EmailVerificationService from "./EmailVerificationService";
 import { FAMILY_MAX_MEMBERS } from "../common/plans";
 import Collection from "../models/Collection";
 import CollectionShare from "../models/CollectionShare";
@@ -33,6 +34,8 @@ class FamilyService {
   async claimInvites(userId: number, email: string) {
     const normalized = email.trim().toLowerCase();
     if (!normalized) return;
+    // Only an account that proved it owns the address gets what was sent to it (F15).
+    if (!(await EmailVerificationService.isVerifiedId(userId))) return;
     await FamilyMember.update(
       { userId },
       { where: { email: normalized, userId: { [Op.is]: null }, status: "invited", ownerId: { [Op.ne]: userId } } }
@@ -118,7 +121,8 @@ class FamilyService {
       throw new FamilyError(`Family includes up to ${FAMILY_MAX_MEMBERS} people besides you.`);
     }
 
-    const account = await User.findOne({ where: { email: { [Op.iLike]: normalized } }, attributes: ["id"] });
+    // Tied to an account only once it confirmed the address; otherwise claimInvites ties it after confirming.
+    const account = await EmailVerificationService.confirmedAccountByEmail(normalized, ["id"]);
     const expiresAt = new Date(Date.now() + INVITE_MS);
     const member = existing
       ? await existing.update({ status: "invited", userId: account?.id ?? existing.userId ?? null, expiresAt })
@@ -140,6 +144,9 @@ class FamilyService {
 
     const invite = await FamilyMember.findOne({ where: { id: inviteId, userId, ...openInvite() } });
     if (!invite) throw new FamilyError("Invite not found or expired", 404);
+    if (!(await EmailVerificationService.isVerifiedId(userId))) {
+      throw new FamilyError("Confirm your email first: open the link we sent you.", 403);
+    }
     if (await EntitlementService.forFamily(userId)) {
       throw new FamilyError("You run a family yourself. Cancel your Family plan to join another.", 409);
     }

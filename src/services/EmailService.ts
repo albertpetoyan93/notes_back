@@ -139,6 +139,58 @@ class EmailService {
     return this.deliver(input.to, subject, text, html);
   }
 
+  /** A new account confirms its address (single-use link, 24 h). */
+  async sendEmailConfirmation(input: { to: string; token: string }) {
+    const origin = EnvVars.FrontendOrigin || "http://localhost:5173";
+    const link = `${origin}/auth/confirm-email?token=${encodeURIComponent(input.token)}`;
+    const subject = "Confirm your email for 2keevo";
+    const text = [
+      "Confirm this email address for your 2keevo account. Until you do, you can't receive invites or shares sent to it.",
+      "",
+      link,
+      "",
+      "The link works once, for 24 hours. If you didn't sign up, ignore this email: the account is removed after 7 days.",
+    ].join("\n");
+    const html = `<div style="font-family:Segoe UI,sans-serif;color:#1f2937;line-height:1.5;">
+<p style="margin:0 0 16px;">Confirm this email address for your 2keevo account. Until you do, you can't receive invites or shares sent to it.</p>
+<p style="margin:0 0 20px;"><a href="${escapeHtml(link)}" style="display:inline-block;background:#6d5efc;color:#ffffff;text-decoration:none;padding:10px 16px;border-radius:8px;">Confirm my email</a></p>
+<p style="margin:0;color:#6b7280;font-size:13px;">The link works once, for 24 hours. If you didn't sign up, ignore this email: the account is removed after 7 days.</p>
+</div>`;
+    return this.deliver(input.to, subject, text, html);
+  }
+
+  /**
+   * Asked for a password reset on an end-to-end account: the recovery key first;
+   * without it, a single-use link that resets the account (personal items are lost).
+   */
+  async sendAccountResetLink(input: { to: string; token: string }) {
+    const origin = EnvVars.FrontendOrigin || "http://localhost:5173";
+    const recover = `${origin}/auth/recover`;
+    const link = `${origin}/auth/reset-account?token=${encodeURIComponent(input.token)}`;
+    const subject = "About resetting your 2keevo master password";
+    const text = [
+      "We received a request to reset your 2keevo password.",
+      "",
+      "Your account uses a master password (end-to-end encryption). 2keevo can't read your vault, so it can't reset it for you. Your company can't either.",
+      "",
+      "If you have your recovery key, use it: nothing is lost. " + recover,
+      "",
+      "Lost your recovery key too? This link resets your account: you choose a new master password, your personal items are deleted for good, and your company access comes back from your company. It works once, for 1 hour:",
+      link,
+      "",
+      "If you did not ask for this, ignore this email. Nothing has changed.",
+    ].join("\n");
+    const html = `<div style="font-family:Segoe UI,sans-serif;color:#1f2937;line-height:1.5;">
+<p style="margin:0 0 16px;">We received a request to reset your 2keevo password.</p>
+<p style="margin:0 0 16px;">Your account uses a master password (end-to-end encryption). 2keevo can't read your vault, so it can't reset it for you. Your company can't either.</p>
+<p style="margin:0 0 16px;"><a href="${escapeHtml(recover)}" style="display:inline-block;background:#6d5efc;color:#ffffff;text-decoration:none;padding:10px 16px;border-radius:8px;">Use your recovery key</a> (nothing is lost)</p>
+<p style="margin:0 0 16px;">Lost your recovery key too? This link resets your account: you choose a new master password, your <strong>personal items are deleted for good</strong>, and your company access comes back from your company. It works once, for 1 hour.</p>
+<p style="margin:0 0 16px;"><a href="${escapeHtml(link)}">Reset my account</a></p>
+<p style="margin:0;color:#6b7280;font-size:13px;">If you did not ask for this, ignore this email. Nothing has changed.</p>
+</div>`;
+    return this.deliver(input.to, subject, text, html);
+  }
+
   /** Asked for a password reset on an end-to-end account: what works instead. */
   async sendMasterPasswordHelp(input: { to: string }) {
     const origin = EnvVars.FrontendOrigin || "http://localhost:5173";
@@ -149,8 +201,8 @@ class EmailService {
       "",
       "Your account uses a master password (end-to-end encryption). 2keevo can't read your vault, so it can't be reset by email.",
       "",
-      "- Use your recovery key: " + link,
-      "- Or, in a company with admin recovery turned on, ask an owner or admin to reset it.",
+      "Use your recovery key: " + link,
+      "Your company can't reset it either: your recovery key is the only way back.",
       "",
       "If you did not ask for this, you can ignore this email. Nothing has changed.",
     ].join("\n");
@@ -159,7 +211,7 @@ class EmailService {
 <p style="margin:0 0 16px;">We received a request to reset your 2keevo password.</p>
 <p style="margin:0 0 16px;">Your account uses a master password (end-to-end encryption). 2keevo can't read your vault, so it can't be reset by email.</p>
 <p style="margin:0 0 16px;"><a href="${safeLink}" style="display:inline-block;background:#6d5efc;color:#ffffff;text-decoration:none;padding:10px 16px;border-radius:8px;">Use your recovery key</a></p>
-<p style="margin:0 0 16px;">Or, in a company with admin recovery turned on, ask an owner or admin to reset it.</p>
+<p style="margin:0 0 16px;">Your company can't reset it either: your recovery key is the only way back.</p>
 <p style="margin:0;color:#6b7280;font-size:13px;">If you did not ask for this, you can ignore this email. Nothing has changed.</p>
 </div>`;
     return this.deliver(input.to, subject, text, html);

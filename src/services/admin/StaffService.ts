@@ -1,3 +1,4 @@
+import EmailVerificationService from "../EmailVerificationService";
 import { Op, UniqueConstraintError, fn, col, where } from "sequelize";
 import AdminStaff, { StaffRole } from "../../models/AdminStaff";
 import User from "../../models/User";
@@ -22,9 +23,10 @@ const byEmail = (email: string) => where(fn("lower", col("email")), email.trim()
 class StaffService {
   /** admin if the email is in ADMIN_EMAILS, else the staff row's role unless disabled. */
   static async roleOf(userId: number): Promise<StaffRole | null> {
-    const user = await User.findByPk(userId, { attributes: ["email"] });
+    const user = await User.findByPk(userId, { attributes: ["email", "emailVerifiedAt"] });
     if (!user) return null;
-    if (isAdminEmail(user.email)) return "admin";
+    // ADMIN_EMAILS gives the role only to the account that confirmed that address.
+    if (isAdminEmail(user.email)) return user.emailVerifiedAt ? "admin" : null;
     const staff = await AdminStaff.findByPk(userId);
     return staff && !staff.disabledAt ? staff.role : null;
   }
@@ -79,8 +81,8 @@ class StaffService {
   }
 
   static async add(email: string, role: StaffRole, by: number) {
-    const user = await User.findOne({ where: byEmail(email), attributes: ["id", "email"] });
-    if (!user) throw fail(404, "No account has that email");
+    const user = await EmailVerificationService.confirmedAccountByEmail(email, ["id", "email"]);
+    if (!user) throw fail(404, "No confirmed account has that email");
     if (isAdminEmail(user.email) || (await AdminStaff.findByPk(user.id))) {
       throw fail(409, "That user is already staff");
     }

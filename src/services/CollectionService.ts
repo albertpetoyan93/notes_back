@@ -1,3 +1,4 @@
+import EmailVerificationService from "./EmailVerificationService";
 import { Op, Transaction } from "sequelize";
 import sequelize from "../configs/DB/sequelize";
 import EntitlementService from "./EntitlementService";
@@ -48,16 +49,14 @@ class CollectionService {
         },
       });
       if (!member) return null;
-      if (member.role !== "member") {
-        return { collection, permission: "owner" as const };
-      }
+      // ADR-002: the role no longer opens a vault; owners and admins need a grant like anyone.
       const share = await CollectionShare.findOne({
         where: this.activeShareFilter({ collectionId, sharedWithUserId: userId }),
       });
       const viaGroup = (await GroupService.forUser(userId, [collectionId])).get(collectionId);
       const permission = this.memberPermission(collection.companyShare, share?.permission, viaGroup);
       if (!permission) return null;
-      return { collection, permission };
+      return { collection, permission, manages: !!share?.manages };
     }
     if (collection.userId === userId) {
       return { collection, permission: "owner" as const };
@@ -175,6 +174,8 @@ class CollectionService {
     }
     // Required 2FA missing: nothing of the company opens, names included.
     if ((await CompanyPolicyService.forUser(userId)).blocked.has(companyId)) return [];
+    // Owners and admins see every vault (to manage it); what they can open comes from grants (ADR-002).
+    const admin = access.role !== "member";
     const collections = await Collection.findAll({
       where: { companyId },
       order: [["name", "ASC"]],
@@ -184,74 +185,76 @@ class CollectionService {
       ? await CollectionShare.findAll({
           where: this.activeShareFilter({
             collectionId: { [Op.in]: ids },
-            ...(access.role === "member" ? { sharedWithUserId: userId } : {}),
+            ...(admin ? {} : { sharedWithUserId: userId }),
           }),
-          include:
-            access.role === "member"
-              ? []
-              : [
-                  {
-                    model: User,
-                    as: "sharedWith",
-                    attributes: ["id", "email", "fullName", "username"],
-                  },
-                ],
+          include: admin ? [{ model: User, as: "sharedWith", attributes: ["id", "email", "fullName", "username"] }] : [],
         })
       : [];
-    const directByCollection = new Map<number, SharePermission>();
+    // A member who manages a vault sees who has it (to share it and pick managers).
+    const managed = admin ? [] : shareRows.filter((row) => row.manages).map((row) => row.collectionId);
+    if (managed.length) {
+      const others = await CollectionShare.findAll({
+        where: this.activeShareFilter({ collectionId: { [Op.in]: managed }, sharedWithUserId: { [Op.ne]: userId } }),
+        include: [{ model: User, as: "sharedWith", attributes: ["id", "email", "fullName", "username"] }],
+      });
+      shareRows.push(...others);
+    }
+    const listsPeople = (collectionId: number) => admin || managed.includes(collectionId);
+    const activeMembers = admin || managed.length
+      ? new Set(
+          (await CompanyMember.findAll({ where: { companyId, status: "active" }, attributes: ["userId"] })).map(
+            (member) => member.userId
+          )
+        )
+      : new Set<number | null>();
+    const mine = new Map<number, { permission: SharePermission; manages: boolean }>();
     const peopleByCollection = new Map<
       number,
-      { userId: number; email: string; name: string; permission: SharePermission }[]
+      { userId: number; email: string; name: string; permission: SharePermission; manages: boolean; source: string }[]
     >();
     for (const share of shareRows) {
-      if (access.role === "member") {
-        const current = directByCollection.get(share.collectionId);
-        if (current !== "edit") directByCollection.set(share.collectionId, share.permission);
-        continue;
+      if (share.sharedWithUserId === userId) {
+        mine.set(share.collectionId, { permission: share.permission, manages: !!share.manages });
       }
-      const person = share.get("sharedWith") as User | undefined;
+      if (!listsPeople(share.collectionId)) continue;
+      const person = share.get ? (share.get("sharedWith") as User | undefined) : undefined;
       const list = peopleByCollection.get(share.collectionId) || [];
       list.push({
         userId: share.sharedWithUserId,
         email: person?.email || "",
         name: person?.fullName || person?.username || person?.email || "",
         permission: share.permission,
+        manages: !!share.manages,
+        source: share.source || "direct",
       });
       peopleByCollection.set(share.collectionId, list);
     }
     const countById = await this.noteCounts(ids);
     const myKeys = await this.myCollectionKeys(userId, ids);
-    const viaGroups = access.role === "member" ? await GroupService.forUser(userId, ids) : new Map<number, SharePermission>();
-    const groupShares = access.role === "member" ? null : await GroupService.sharesOf(ids);
-    const visible =
-      access.role === "member"
-        ? collections.filter(
-            (collection) =>
-              collection.companyShare === "view" ||
-              collection.companyShare === "edit" ||
-              directByCollection.has(collection.id) ||
-              viaGroups.has(collection.id)
-          )
-        : collections;
-    return visible.map((collection) => {
+    const viaGroups = await GroupService.forUser(userId, ids);
+    const groupShares = admin ? await GroupService.sharesOf(ids) : null;
+    const rows = collections.map((collection) => {
       const companyShare =
         collection.companyShare === "view" || collection.companyShare === "edit"
           ? collection.companyShare
           : null;
-      const permission =
-        access.role === "member"
-          ? this.memberPermission(companyShare, directByCollection.get(collection.id), viaGroups.get(collection.id)) || "view"
-          : ("owner" as const);
+      const permission = this.memberPermission(companyShare, mine.get(collection.id)?.permission, viaGroups.get(collection.id));
+      const people = peopleByCollection.get(collection.id) || [];
       return {
         id: collection.id,
         ...nameFields(collection, myKeys.get(collection.id)),
-        noteCount: countById.get(collection.id) || 0,
+        // Without access the vault's contents stay closed, counts included.
+        noteCount: permission ? countById.get(collection.id) || 0 : null,
         permission,
+        manages: !!mine.get(collection.id)?.manages,
         companyShare,
-        shares: access.role === "member" ? [] : peopleByCollection.get(collection.id) || [],
+        shares: listsPeople(collection.id) ? people : [],
         groups: groupShares?.get(collection.id) || [],
+        // Nobody active can hand the vault's key to newcomers.
+        noManager: admin ? !people.some((person) => person.manages && activeMembers.has(person.userId)) : false,
       };
     });
+    return admin ? rows : rows.filter((row) => row.permission);
   }
 
   async shareCompanyCollection(
@@ -260,16 +263,10 @@ class CollectionService {
     userId: number,
     audience: string,
     permission: string,
-    emails: string[] = []
+    emails: string[] = [],
+    manages?: boolean
   ) {
-    const manager = await this.companyMember(companyId, userId);
-    if (!manager || manager.role === "member") {
-      throw Object.assign(new Error("You cannot share collections here"), { status: 403 });
-    }
-    const collection = await Collection.findOne({ where: { id: collectionId, companyId } });
-    if (!collection) {
-      throw Object.assign(new Error("Collection not found"), { status: 404 });
-    }
+    const collection = await this.requireVaultManager(companyId, collectionId, userId);
     const nextPermission: SharePermission = permission === "edit" ? "edit" : "view";
     if (audience === "all") {
       await collection.update({ companyShare: nextPermission });
@@ -283,12 +280,13 @@ class CollectionService {
     const failed: { email: string; message: string }[] = [];
     for (const normalized of list) {
       try {
-        const recipient = await User.findOne({
-          where: { email: { [Op.iLike]: normalized } },
-          attributes: ["id", "email"],
-        });
+        const recipient = await EmailVerificationService.confirmedAccountByEmail(normalized, ["id", "email"]);
         if (!recipient) {
           throw Object.assign(new Error("That person is not in this company"), { status: 400 });
+        }
+        // Access for yourself goes through the self-grant, which is logged and told to the managers.
+        if (recipient.id === userId) {
+          throw Object.assign(new Error("Use “Give me access” for yourself (it's logged)."), { status: 400 });
         }
         const member = await CompanyMember.findOne({
           where: { companyId, userId: recipient.id, status: "active" },
@@ -304,6 +302,8 @@ class CollectionService {
             permission: nextPermission,
             expiresAt: null,
             sharedByUserId: userId,
+            // Sharing can make someone a manager, never quietly stop it (that's setManager, with its 409).
+            ...(manages ? { manages: true } : {}),
           });
         } else {
           await CollectionShare.create({
@@ -312,6 +312,8 @@ class CollectionService {
             sharedWithUserId: recipient.id,
             permission: nextPermission,
             expiresAt: null,
+            manages: !!manages,
+            source: "direct",
           });
         }
         shared.push({ email: recipient.email });
@@ -331,14 +333,7 @@ class CollectionService {
     userId: number,
     target: { all?: boolean; memberUserId?: number }
   ) {
-    const manager = await this.companyMember(companyId, userId);
-    if (!manager || manager.role === "member") {
-      throw Object.assign(new Error("You cannot share collections here"), { status: 403 });
-    }
-    const collection = await Collection.findOne({ where: { id: collectionId, companyId } });
-    if (!collection) {
-      throw Object.assign(new Error("Collection not found"), { status: 404 });
-    }
+    const collection = await this.requireVaultManager(companyId, collectionId, userId);
     if (target.all) {
       await collection.update({ companyShare: null });
       return { companyShare: null };
@@ -346,10 +341,156 @@ class CollectionService {
     if (!target.memberUserId) {
       throw Object.assign(new Error("Choose a person to remove"), { status: 400 });
     }
+    await this.assertKeepsAManager(companyId, collectionId, target.memberUserId);
     await CollectionShare.destroy({
       where: { collectionId, sharedWithUserId: target.memberUserId },
     });
     return { removed: target.memberUserId };
+  }
+
+  /**
+   * Who may share a company vault and change its managers: the company's
+   * owners and admins, and the vault's own managers (ADR-002).
+   */
+  private async requireVaultManager(companyId: number, collectionId: number, userId: number) {
+    const member = await this.companyMember(companyId, userId);
+    const collection = member ? await Collection.findOne({ where: { id: collectionId, companyId } }) : null;
+    if (member && !collection) {
+      throw Object.assign(new Error("Collection not found"), { status: 404 });
+    }
+    const managesIt =
+      !!member &&
+      (member.role !== "member" ||
+        !!(await CollectionShare.findOne({
+          where: this.activeShareFilter({ collectionId, sharedWithUserId: userId, manages: true }),
+        })));
+    if (!member || !collection || !managesIt) {
+      throw Object.assign(new Error("You cannot share collections here"), { status: 403 });
+    }
+    return collection;
+  }
+
+  /** Active company members who manage this vault, besides `except`. */
+  async otherManagers(companyId: number, collectionId: number, except: number) {
+    const shares = await CollectionShare.findAll({
+      where: this.activeShareFilter({ collectionId, manages: true, sharedWithUserId: { [Op.ne]: except } }),
+      attributes: ["sharedWithUserId"],
+    });
+    if (!shares.length) return [];
+    const active = await CompanyMember.findAll({
+      where: { companyId, status: "active", userId: { [Op.in]: shares.map((row) => row.sharedWithUserId) } },
+      attributes: ["userId"],
+    });
+    return active.map((row) => row.userId as number);
+  }
+
+  /**
+   * An admin made member: their "access as admin" grants go, except where
+   * they're a vault's only manager (the owner then picks another and removes it).
+   */
+  async dropLegacyGrants(companyId: number, userId: number) {
+    const vaults = await Collection.findAll({ where: { companyId }, attributes: ["id"] });
+    if (!vaults.length) return 0;
+    const legacy = await CollectionShare.findAll({
+      where: { sharedWithUserId: userId, source: "admin_legacy", collectionId: { [Op.in]: vaults.map((row) => row.id) } },
+    });
+    let dropped = 0;
+    for (const share of legacy) {
+      if (share.manages && !(await this.otherManagers(companyId, share.collectionId, userId)).length) continue;
+      await CollectionShare.destroy({ where: { id: share.id } });
+      dropped += 1;
+    }
+    // Shares they had before, which the migration raised to edit + manager: back to what they were.
+    const raised = await CollectionShare.findAll({
+      where: {
+        sharedWithUserId: userId,
+        priorPermission: { [Op.not]: null },
+        collectionId: { [Op.in]: vaults.map((row) => row.id) },
+      },
+    });
+    for (const share of raised) {
+      const keepManaging =
+        !share.priorManages && share.manages && !(await this.otherManagers(companyId, share.collectionId, userId)).length;
+      await share.update({
+        permission: share.priorPermission as SharePermission,
+        manages: !!share.priorManages || keepManaging,
+        priorPermission: null,
+        priorManages: null,
+      });
+    }
+    return dropped;
+  }
+
+  /** Removing or demoting someone mustn't leave the vault with no manager (409). */
+  private async assertKeepsAManager(companyId: number, collectionId: number, targetUserId: number) {
+    const target = await CollectionShare.findOne({
+      where: this.activeShareFilter({ collectionId, sharedWithUserId: targetUserId, manages: true }),
+    });
+    if (!target) return;
+    if (!(await this.otherManagers(companyId, collectionId, targetUserId)).length) {
+      throw Object.assign(new Error("A vault needs at least one manager."), { status: 409 });
+    }
+  }
+
+  /**
+   * An owner or admin gives themselves access to a vault (ADR-002): logged,
+   * the vault's managers are told, and it shows as self-given. The key comes
+   * from a manager's app through the usual key tasks.
+   */
+  async selfGrant(companyId: number, collectionId: number, userId: number, permission: string) {
+    const member = await this.companyMember(companyId, userId);
+    if (!member || member.role === "member") {
+      throw Object.assign(new Error("Only owners and admins can give themselves access."), { status: 403 });
+    }
+    const collection = await Collection.findOne({ where: { id: collectionId, companyId } });
+    if (!collection) throw Object.assign(new Error("Collection not found"), { status: 404 });
+    const next: SharePermission = permission === "edit" ? "edit" : "view";
+    const existing = await CollectionShare.findOne({ where: { collectionId, sharedWithUserId: userId } });
+    if (existing) {
+      await existing.update({ permission: next, expiresAt: null });
+    } else {
+      await CollectionShare.create({
+        collectionId,
+        sharedByUserId: userId,
+        sharedWithUserId: userId,
+        permission: next,
+        expiresAt: null,
+        manages: false,
+        source: "self",
+      });
+    }
+    const { default: AuditService } = await import("./AuditService");
+    const { default: NotificationService } = await import("./NotificationService");
+    await AuditService.record({ actorId: userId, action: "vault_self_granted", companyId, collectionId, details: { permission: next } });
+    const me = await User.findByPk(userId, { attributes: ["email"] });
+    for (const managerId of await this.otherManagers(companyId, collectionId, userId)) {
+      await NotificationService.create(
+        managerId,
+        `${me?.email || "An admin"} gave themselves ${next === "edit" ? "edit" : "view"} access to a vault you manage. Your 2keevo hands them its key.`
+      ).catch(() => undefined);
+    }
+    return { collectionId, permission: next };
+  }
+
+  /** Make someone a vault manager or stop it (owners/admins or a manager); never the last one. */
+  async setManager(companyId: number, collectionId: number, actorId: number, targetUserId: number, manages: boolean) {
+    await this.requireVaultManager(companyId, collectionId, actorId);
+    const share = await CollectionShare.findOne({
+      where: this.activeShareFilter({ collectionId, sharedWithUserId: targetUserId }),
+    });
+    if (!share) throw Object.assign(new Error("Share the vault with them first."), { status: 400 });
+    if (!manages) await this.assertKeepsAManager(companyId, collectionId, targetUserId);
+    await share.update({ manages });
+    const { default: AuditService } = await import("./AuditService");
+    await AuditService.record({
+      actorId,
+      action: "vault_manager_changed",
+      companyId,
+      collectionId,
+      targetUserId,
+      details: { manages },
+    });
+    return { userId: targetUserId, manages };
   }
 
   async createForCompany(companyId: number, userId: number, name: string) {
@@ -372,7 +513,17 @@ class CollectionService {
       companyId,
       name: trimmed,
     });
-    return { id: collection.id, name: collection.name, noteCount: 0, permission: "owner" as const };
+    // Whoever creates a vault opens and manages it (ADR-002: no access by role).
+    await CollectionShare.create({
+      collectionId: collection.id,
+      sharedByUserId: userId,
+      sharedWithUserId: userId,
+      permission: "edit",
+      manages: true,
+      source: "direct",
+      expiresAt: null,
+    });
+    return { id: collection.id, name: collection.name, noteCount: 0, permission: "edit" as const, manages: true };
   }
 
   /** A member's access to a company collection: the best of everyone, a share to them, and their groups. */
@@ -431,10 +582,7 @@ class CollectionService {
         attributes: ["id", "companyShare"],
       });
       if (!collections.length) continue;
-      if (member.role !== "member") {
-        collections.forEach((collection) => result.set(collection.id, "owner"));
-        continue;
-      }
+      // ADR-002: owners and admins open vaults through grants too, not by role.
       const shares = await CollectionShare.findAll({
         where: this.activeShareFilter({
           collectionId: { [Op.in]: collections.map((collection) => collection.id) },
@@ -469,9 +617,24 @@ class CollectionService {
     });
   }
 
+  /**
+   * Who may rename or delete a collection: its owner for a personal one; for
+   * a company vault, the company's owners and admins (ADR-002: managing a
+   * vault isn't opening it).
+   */
+  private async administers(collectionId: number, userId: number) {
+    const collection = await Collection.findByPk(collectionId);
+    if (!collection) return null;
+    if (!collection.companyId) return collection.userId === userId ? { collection } : null;
+    const member = await this.companyMember(collection.companyId, userId);
+    if (!member || member.role === "member") return null;
+    if ((await CompanyPolicyService.forUser(userId)).blocked.has(collection.companyId)) return null;
+    return { collection };
+  }
+
   async rename(collectionId: number, userId: number, name: string, enc?: unknown) {
-    const access = await this.getAccess(collectionId, userId);
-    if (!access || access.permission !== "owner") return null;
+    const access = await this.administers(collectionId, userId);
+    if (!access) return null;
 
     // An encrypted name stays encrypted the same way (user key, or the current collection key).
     const sealed = access.collection.nameKey ? this.encryptedName(enc, access.collection.nameKey) : null;
@@ -515,8 +678,8 @@ class CollectionService {
   }
 
   async remove(collectionId: number, userId: number) {
-    const access = await this.getAccess(collectionId, userId);
-    if (!access || access.permission !== "owner") return false;
+    const access = await this.administers(collectionId, userId);
+    if (!access) return false;
     const links = await CollectionNote.findAll({
       where: { collectionId },
       attributes: ["noteId"],
@@ -893,8 +1056,11 @@ class CollectionService {
   }
 
   async listShares(collectionId: number, userId: number) {
-    const access = await this.getAccess(collectionId, userId);
-    if (!access || access.permission !== "owner") return null;
+    // The collection's owner, a company's owners/admins, or the vault's managers; not everyone it's shared with.
+    if (!(await this.administers(collectionId, userId))) {
+      const access = await this.getAccess(collectionId, userId);
+      if (!access || !("manages" in access && access.manages)) return null;
+    }
     return CollectionShare.findAll({
       where: { collectionId },
       include: [
@@ -915,6 +1081,7 @@ class CollectionService {
     permission: SharePermission = "view",
     expiresAt: Date | null = null
   ) {
+    await this.assertPersonal(collectionId);
     const collection = await Collection.findOne({
       where: { id: collectionId, userId: ownerId },
     });
@@ -933,11 +1100,12 @@ class CollectionService {
     }
 
     const recipient = await User.findOne({
-      where: { [Op.or]: [{ email: trimmed }, { username: trimmed }] },
+      // Unconfirmed accounts can't receive shares by an address they may not own (F15).
+      where: { [Op.or]: [{ email: trimmed }, { username: trimmed }], emailVerifiedAt: { [Op.not]: null } },
     });
     if (!recipient) {
       throw Object.assign(
-        new Error(`No user found with email or username "${trimmed}"`),
+        new Error(`No confirmed account with email or username "${trimmed}"`),
         { status: 404 }
       );
     }
@@ -1028,6 +1196,14 @@ class CollectionService {
     if (changedExpiry) await EntitlementService.assertCanUseShareExpiry(ownerId);
   }
 
+  /** Company vaults are shared on the company page (manager rules, audit), not as personal collections. */
+  private async assertPersonal(collectionId: number) {
+    const collection = await Collection.findByPk(collectionId, { attributes: ["id", "companyId"] });
+    if (collection?.companyId) {
+      throw Object.assign(new Error("Use the company page to share company vaults."), { status: 400 });
+    }
+  }
+
   async shareWithMany(
     collectionId: number,
     ownerId: number,
@@ -1036,6 +1212,7 @@ class CollectionService {
     expiresAt: Date | null = null,
     e2eKeys?: unknown
   ) {
+    await this.assertPersonal(collectionId);
     const unique = [
       ...new Set(identifiers.map((id) => id?.trim()).filter(Boolean)),
     ] as string[];
@@ -1045,7 +1222,7 @@ class CollectionService {
     const owned = await Collection.findOne({ where: { id: collectionId, userId: ownerId }, attributes: ["id", "companyId"] });
     if (owned && !owned.companyId && unique.length) {
       const people = await User.findAll({
-        where: { [Op.or]: [{ email: { [Op.in]: unique } }, { username: { [Op.in]: unique } }] },
+        where: { [Op.or]: [{ email: { [Op.in]: unique } }, { username: { [Op.in]: unique } }], emailVerifiedAt: { [Op.not]: null } },
         attributes: ["id"],
       });
       const already = await CollectionShare.findAll({
@@ -1056,7 +1233,7 @@ class CollectionService {
     }
     if (owned && unique.length) {
       const recipients = await User.findAll({
-        where: { [Op.or]: [{ email: { [Op.in]: unique } }, { username: { [Op.in]: unique } }] },
+        where: { [Op.or]: [{ email: { [Op.in]: unique } }, { username: { [Op.in]: unique } }], emailVerifiedAt: { [Op.not]: null } },
         attributes: ["id"],
       });
       await E2EItemService.ensureCollectionShare(ownerId, collectionId, recipients.map((user) => user.id), e2eKeys);
@@ -1103,6 +1280,7 @@ class CollectionService {
   }
 
   async revoke(collectionId: number, ownerId: number, sharedWithUserId: number) {
+    await this.assertPersonal(collectionId);
     const collection = await Collection.findOne({
       where: { id: collectionId, userId: ownerId },
     });

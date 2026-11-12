@@ -2063,12 +2063,14 @@ class NoteService {
     const recipient = await User.findOne({
       where: {
         [Op.or]: [{ email: trimmed }, { username: trimmed }],
+        // Unconfirmed accounts can't receive shares by an address they may not own (F15).
+        emailVerifiedAt: { [Op.not]: null },
       },
     });
 
     if (!recipient) {
       throw Object.assign(
-        new Error(`No user found with email or username "${trimmed}"`),
+        new Error(`No confirmed account with email or username "${trimmed}"`),
         { status: 404 },
       );
     }
@@ -2204,7 +2206,7 @@ class NoteService {
     );
     if (!inCompany && uniqueIdentifiers.length) {
       const people = await User.findAll({
-        where: { [Op.or]: [{ email: { [Op.in]: uniqueIdentifiers } }, { username: { [Op.in]: uniqueIdentifiers } }] },
+        where: { [Op.or]: [{ email: { [Op.in]: uniqueIdentifiers } }, { username: { [Op.in]: uniqueIdentifiers } }], emailVerifiedAt: { [Op.not]: null } },
         attributes: ["id"],
       });
       const already = await NoteShare.findAll({
@@ -2217,7 +2219,7 @@ class NoteService {
     // Before the per-person loop, which reports errors as failed people.
     const recipients = uniqueIdentifiers.length
       ? await User.findAll({
-          where: { [Op.or]: [{ email: { [Op.in]: uniqueIdentifiers } }, { username: { [Op.in]: uniqueIdentifiers } }] },
+          where: { [Op.or]: [{ email: { [Op.in]: uniqueIdentifiers } }, { username: { [Op.in]: uniqueIdentifiers } }], emailVerifiedAt: { [Op.not]: null } },
           attributes: ["id"],
         })
       : [];
