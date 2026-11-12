@@ -201,6 +201,28 @@ describe("forgot password on an end-to-end account", () => {
     expect(text).toContain("/auth/reset-account?token=t");
     expect(text).toMatch(/personal items .*deleted/i);
   });
+
+  it("in production without mail, no reset link (account or password) is written to the log", async () => {
+    const EnvVars = (await import("@src/common/EnvVars")).default as { NodeEnv: string };
+    const logger = (await import("jet-logger")).default;
+    const before = EnvVars.NodeEnv;
+    EnvVars.NodeEnv = "production";
+    vi.spyOn(EmailService, "isConfigured").mockReturnValue(false);
+    const lines: string[] = [];
+    for (const level of ["info", "warn", "err", "imp"] as const) {
+      vi.spyOn(logger, level).mockImplementation(((line: unknown) => void lines.push(String(line))) as never);
+    }
+    db.users.push({ id: 4, email: "old@acme.com", e2eEnabled: false });
+    try {
+      const AuthService = (await import("@src/services/AuthService")).default;
+      await AuthService.requestPasswordReset("sam@acme.com");
+      await AuthService.requestPasswordReset("old@acme.com");
+    } finally {
+      EnvVars.NodeEnv = before;
+    }
+    expect(db.users.find((row) => row.id === 4).passwordResetTokenHash).toBeTruthy();
+    expect(lines.join("\n")).not.toMatch(/token=/);
+  });
 });
 
 describe("final review fixes", () => {

@@ -179,10 +179,7 @@ class AuthService {
       await user.update({ passwordResetTokenHash, passwordResetExpires });
       try {
         if (EmailService.isConfigured()) await EmailService.sendAccountResetLink({ to: user.email, token });
-        else {
-          const origin = EnvVars.FrontendOrigin || "http://localhost:5173";
-          logger.info(`Account reset link for ${user.email}: ${origin}/auth/reset-account?token=${token}`);
-        }
+        else this.logLinkOutsideProduction(user, "Account reset", `/auth/reset-account?token=${token}`);
       } catch (error) {
         logger.err(error, true);
       }
@@ -192,10 +189,7 @@ class AuthService {
     await user.update({ passwordResetTokenHash, passwordResetExpires });
 
     if (!EmailService.isConfigured()) {
-      const origin = EnvVars.FrontendOrigin || "http://localhost:5173";
-      logger.info(
-        `Password reset link for ${user.email}: ${origin}/auth/reset?token=${token}`
-      );
+      this.logLinkOutsideProduction(user, "Password reset", `/auth/reset?token=${token}`);
       return RESET_MESSAGE;
     }
 
@@ -205,6 +199,16 @@ class AuthService {
       logger.err(error, true);
     }
     return RESET_MESSAGE;
+  }
+
+  /** Without mail, a local dev server prints the link. Production never logs it: anyone reading the logs could use it. */
+  private static logLinkOutsideProduction(user: User, what: string, path: string) {
+    if (EnvVars.NodeEnv === "production") {
+      logger.warn(`${what} asked for user ${user.id}, but email isn't set up: no link sent.`);
+      return;
+    }
+    const origin = EnvVars.FrontendOrigin || "http://localhost:5173";
+    logger.info(`${what} link for ${user.email}: ${origin}${path}`);
   }
 
   static async resetPassword(token: string, password: string) {

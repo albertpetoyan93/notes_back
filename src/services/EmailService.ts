@@ -26,11 +26,17 @@ class EmailService {
     });
   }
 
+  /** Account-safety emails come from the security address, so a "that wasn't me" reply reaches it. */
+  private securityFrom() {
+    return EnvVars.Mail.SecurityFrom || EnvVars.Mail.From;
+  }
+
   private async deliver(
     to: string,
     subject: string,
     text: string,
     html: string,
+    from: string = EnvVars.Mail.From,
   ) {
     if (!this.isConfigured()) {
       logger.info(
@@ -40,7 +46,7 @@ class EmailService {
     }
     try {
       await this.transport().sendMail({
-        from: EnvVars.Mail.From,
+        from,
         to,
         subject,
         text,
@@ -136,7 +142,7 @@ class EmailService {
 <p style="margin:0 0 20px;"><a href="${safeLink}" style="display:inline-block;background:#6d5efc;color:#ffffff;text-decoration:none;padding:10px 16px;border-radius:8px;">Reset password</a></p>
 <p style="margin:0;color:#6b7280;font-size:13px;">If you did not ask for this, you can ignore this email.</p>
 </div>`;
-    return this.deliver(input.to, subject, text, html);
+    return this.deliver(input.to, subject, text, html, this.securityFrom());
   }
 
   /** A new account confirms its address (single-use link, 24 h). */
@@ -188,7 +194,7 @@ class EmailService {
 <p style="margin:0 0 16px;"><a href="${escapeHtml(link)}">Reset my account</a></p>
 <p style="margin:0;color:#6b7280;font-size:13px;">If you did not ask for this, ignore this email. Nothing has changed.</p>
 </div>`;
-    return this.deliver(input.to, subject, text, html);
+    return this.deliver(input.to, subject, text, html, this.securityFrom());
   }
 
   /** Asked for a password reset on an end-to-end account: what works instead. */
@@ -214,7 +220,7 @@ class EmailService {
 <p style="margin:0 0 16px;">Your company can't reset it either: your recovery key is the only way back.</p>
 <p style="margin:0;color:#6b7280;font-size:13px;">If you did not ask for this, you can ignore this email. Nothing has changed.</p>
 </div>`;
-    return this.deliver(input.to, subject, text, html);
+    return this.deliver(input.to, subject, text, html, this.securityFrom());
   }
 
   async sendNewSignIn(input: {
@@ -261,7 +267,7 @@ class EmailService {
 <p style="margin:0 0 16px;">If this was you, there is nothing to do. If it wasn't, change your password and sign out the other devices.</p>
 <p style="margin:0;"><a href="${safeLink}" style="display:inline-block;background:#6d5efc;color:#ffffff;text-decoration:none;padding:10px 16px;border-radius:8px;">Security settings</a></p>
 </div>`;
-    return this.deliver(input.to, subject, text, html);
+    return this.deliver(input.to, subject, text, html, this.securityFrom());
   }
 
   /** A short "this changed on your account" email with a link to Security settings. */
@@ -281,7 +287,7 @@ class EmailService {
 <p style="margin:0 0 16px;">If this wasn't you, review your security settings right away.</p>
 <p style="margin:0;"><a href="${escapeHtml(link)}" style="display:inline-block;background:#6d5efc;color:#ffffff;text-decoration:none;padding:10px 16px;border-radius:8px;">Security settings</a></p>
 </div>`;
-    return this.deliver(input.to, subject, text, html);
+    return this.deliver(input.to, subject, text, html, this.securityFrom());
   }
 
   /** Support asked to turn off 2FA; nothing changes unless the user confirms. */
@@ -302,7 +308,7 @@ class EmailService {
 <p style="margin:0 0 20px;"><a href="${escapeHtml(input.link)}" style="display:inline-block;background:#6d5efc;color:#ffffff;text-decoration:none;padding:10px 16px;border-radius:8px;">Review the request</a></p>
 <p style="margin:0;color:#6b7280;font-size:13px;">${escapeHtml(ignore)}</p>
 </div>`;
-    return this.deliver(input.to, subject, text, html);
+    return this.deliver(input.to, subject, text, html, this.securityFrom());
   }
 
   /** Accounts that haven't turned on end-to-end encryption yet (npm run e2e:remind). */
@@ -319,7 +325,7 @@ class EmailService {
 <p style="margin:0 0 16px;">${escapeHtml(what)}</p>
 <p style="margin:0;"><a href="${escapeHtml(link)}" style="display:inline-block;background:#6d5efc;color:#ffffff;text-decoration:none;padding:10px 16px;border-radius:8px;">Turn it on</a></p>
 </div>`;
-    return this.deliver(input.to, subject, text, html);
+    return this.deliver(input.to, subject, text, html, this.securityFrom());
   }
 
   async sendTwoFactorChanged(input: { to: string; enabled: boolean }) {
@@ -340,7 +346,7 @@ class EmailService {
 <p style="margin:0 0 16px;">If this was not you, reset your password right away and review your security settings.</p>
 <p style="margin:0;"><a href="${safeLink}" style="display:inline-block;background:#6d5efc;color:#ffffff;text-decoration:none;padding:10px 16px;border-radius:8px;">Security settings</a></p>
 </div>`;
-    return this.deliver(input.to, subject, text, html);
+    return this.deliver(input.to, subject, text, html, this.securityFrom());
   }
 
   /** A trial ends in a few days; nothing is charged either way. */

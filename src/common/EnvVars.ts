@@ -37,6 +37,8 @@ export default {
     User: process.env.SMTP_USER ?? "",
     Password: process.env.SMTP_PASSWORD ?? "",
     From: process.env.MAIL_FROM ?? "",
+    /** Sender for account-safety emails (sign-ins, resets, 2FA). Empty: MAIL_FROM. */
+    SecurityFrom: process.env.MAIL_FROM_SECURITY ?? "",
   },
   FrontendOrigin: (process.env.FRONTEND_ORIGIN ?? "")
     .split(",")[0]
