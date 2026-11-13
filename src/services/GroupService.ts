@@ -182,7 +182,13 @@ class GroupService {
     if (members.length !== wanted.length) throw new GroupError("Only active members of the company can be added.");
     const existing = await CompanyGroupMember.findAll({ where: { groupId, userId: { [Op.in]: wanted } } });
     const added = wanted.filter((id) => !existing.some((row) => row.userId === id));
+    // Adding themselves to a group that has vaults: logged like "Give me access" (SEC06).
+    const reached = added.includes(userId) ? await this.vaultsNewTo(userId, groupId) : [];
     for (const id of added) await CompanyGroupMember.create({ groupId, userId: id, addedBy: userId });
+    const { default: CollectionService } = await import("./CollectionService");
+    for (const share of reached) {
+      await CollectionService.recordSelfAccess(companyId, share.collectionId, userId, share.permission, `the group ${group.name}`);
+    }
     // Asking to join is answered by being added.
     await GroupRequest.update(
       { status: "approved", decidedBy: userId, decidedAt: new Date() },
@@ -208,9 +214,14 @@ class GroupService {
     const collection = await Collection.findOne({ where: { id: collectionId, companyId }, attributes: ["id"] });
     if (!collection) throw new GroupError("Collection not found", 404);
     const next: SharePermission = permission === "edit" ? "edit" : "view";
+    const { default: CollectionService } = await import("./CollectionService");
+    // Sharing to a group they're in gives them the vault: logged like "Give me access" (SEC06).
+    const inGroup = !!(await CompanyGroupMember.findOne({ where: { groupId, userId } }));
+    const before = inGroup ? await CollectionService.getAccess(collectionId, userId) : null;
     const existing = await CollectionGroupShare.findOne({ where: { collectionId, groupId } });
     if (existing) await existing.update({ permission: next });
     else await CollectionGroupShare.create({ collectionId, groupId, permission: next });
+    if (inGroup && !before) await CollectionService.recordSelfAccess(companyId, collectionId, userId, next, `the group ${group.name}`);
     return { group: group.name, permission: next };
   }
 
@@ -315,6 +326,17 @@ class GroupService {
     const member = await this.membership(companyId, userId);
     if (member.role === "member") throw new GroupError("Only owners and admins can manage groups.", 403);
     return member;
+  }
+
+  /** The group's vaults this person can't open yet. */
+  private async vaultsNewTo(userId: number, groupId: number) {
+    const { default: CollectionService } = await import("./CollectionService");
+    const shares = await CollectionGroupShare.findAll({ where: { groupId }, attributes: ["collectionId", "permission"] });
+    const fresh: { collectionId: number; permission: SharePermission }[] = [];
+    for (const share of shares) {
+      if (!(await CollectionService.getAccess(share.collectionId, userId))) fresh.push(share);
+    }
+    return fresh;
   }
 
   private async managedGroup(companyId: number, userId: number, groupId: number) {

@@ -19,7 +19,8 @@ const app = express();
 
 app.set("trust proxy", 1);
 
-app.use("/doc", swaggerUi.serve, swaggerUi.setup(swaggerDocument));
+// The API map is for development; production doesn't publish it.
+if (EnvVars.NodeEnv !== "production") app.use("/doc", swaggerUi.serve, swaggerUi.setup(swaggerDocument));
 
 // **** Setup **** //
 

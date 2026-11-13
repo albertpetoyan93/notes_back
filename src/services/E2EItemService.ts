@@ -446,6 +446,20 @@ class E2EItemService {
     if (hasNeeds(needs)) throw keysNeeded(needs);
   }
 
+  /**
+   * Collections whose keys this person may write: owner, edit, or vault manager. Someone who
+   * can only view could otherwise plant a key of their own choosing (SEC06).
+   */
+  private async writableCollections(callerId: number, collectionIds: number[]) {
+    const { default: CollectionService } = await import("./CollectionService");
+    const writable = new Set<number>();
+    for (const id of new Set(collectionIds)) {
+      const access = await CollectionService.getAccess(id, callerId);
+      if (access && (access.permission !== "view" || (access as { manages?: boolean }).manages)) writable.add(id);
+    }
+    return writable;
+  }
+
   /** Store key copies made in the browser, after checking each one belongs. */
   async applyKeys(
     callerId: number,
@@ -461,6 +475,7 @@ class E2EItemService {
       ...itemEntries.map((entry: any) => Number(entry?.collectionId)),
     ].filter((id) => Number.isInteger(id));
     const members = await this.membersOf(collectionIds, extraMembers);
+    const writable = await this.writableCollections(callerId, collectionIds);
 
     await sequelize.transaction(async (transaction) => {
       for (const entry of collectionEntries) {
@@ -468,7 +483,7 @@ class E2EItemService {
         const keyVersion = Number(entry?.keyVersion);
         const collection = await Collection.findByPk(collectionId, { transaction, lock: transaction.LOCK.UPDATE });
         const people = members.get(collectionId) || [];
-        if (!collection || !people.some((member) => member.userId === callerId)) {
+        if (!collection || !people.some((member) => member.userId === callerId) || !writable.has(collectionId)) {
           throw httpError("You can't give keys for this collection.", 403);
         }
         const keys = (Array.isArray(entry?.keys) ? entry.keys : []).map((key: any) => ({
@@ -530,8 +545,9 @@ class E2EItemService {
           !collection ||
           collection.e2eKeyVersion !== keyVersion ||
           !inCollection ||
-          // A work item's creator needs access to the collection like anyone else.
-          !((note.companyId == null && note.userId === callerId) || people.some((member) => member.userId === callerId))
+          // A work item's creator needs access to the collection like anyone else; view-only can't write keys.
+          !((note.companyId == null && note.userId === callerId) ||
+            (people.some((member) => member.userId === callerId) && writable.has(collectionId)))
         ) {
           throw httpError("An item key doesn't fit its collection. Try again.", 409);
         }
@@ -1046,10 +1062,13 @@ class E2EItemService {
       attributes: ["companyId"],
     });
     const companyIds = memberships.map((row) => row.companyId);
+    // A company whose 2FA rule blocks this person: no key tasks there (SEC06).
+    const { default: CompanyPolicyService } = await import("./CompanyPolicyService");
+    const blocked = companyIds.length ? (await CompanyPolicyService.forUser(userId)).blocked : new Set<number>();
     const activeCompanies = companyIds.length
-      ? (await Company.findAll({ where: { id: { [Op.in]: companyIds }, status: "active" }, attributes: ["id"] })).map(
-          (company) => company.id
-        )
+      ? (await Company.findAll({ where: { id: { [Op.in]: companyIds }, status: "active" }, attributes: ["id"] }))
+          .map((company) => company.id)
+          .filter((id) => !blocked.has(id))
       : [];
     const managing = activeCompanies.length
       ? (
@@ -1246,6 +1265,13 @@ class E2EItemService {
       if (!collection || collection.e2eKeyVersion == null) throw httpError("This collection isn't encrypted.", 409);
       const keyVersion = Number(input?.keyVersion);
       if (keyVersion !== collection.e2eKeyVersion + 1) throw httpError("The collection key changed. Try again.", 409);
+      // Only someone holding the key can re-wrap the items; without it a rotation would wipe them (SEC06).
+      const mine = await CollectionKey.findOne({
+        where: { collectionId, userId, keyVersion: collection.e2eKeyVersion },
+        attributes: ["id"],
+        transaction,
+      });
+      if (!mine) throw httpError("You need the vault's current key to replace it.", 409);
       const keys = (Array.isArray(input?.keys) ? input.keys : []).map((key: any) => ({
         userId: Number(key?.userId),
         wrappedKey: assertKey(key?.wrappedKey, SEALED_KEY, "collection key"),

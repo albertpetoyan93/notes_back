@@ -1,3 +1,4 @@
+import { Op } from "sequelize";
 import bcrypt from "bcrypt";
 import crypto from "crypto";
 import EnvVars from "../common/EnvVars";
@@ -119,10 +120,11 @@ class E2EAccountService {
   async prelogin(email: string) {
     const address = String(email || "").trim();
     if (!address) return { e2e: false };
-    const user = await User.findOne({
-      where: { email: address },
-      attributes: ["id", "e2eEnabled", "kdfSalt", "kdfParams"],
-    });
+    const attributes = ["id", "e2eEnabled", "kdfSalt", "kdfParams"];
+    // Any letter case finds the account, so "BOB@x.com" can't tell an existing "bob@x.com" apart (SEC06).
+    const user =
+      (await User.findOne({ where: { email: address }, attributes })) ||
+      (await User.findOne({ where: { email: { [Op.iLike]: address.replace(/[\\%_]/g, "\\$&") } }, attributes }));
     if (!user) return { e2e: true, kdf: { ...DEFAULT_KDF, salt: madeUpSalt(address) } };
     if (!user.e2eEnabled || !user.kdfSalt || !user.kdfParams) return { e2e: false };
     return { e2e: true, kdf: { ...user.kdfParams, salt: user.kdfSalt } };

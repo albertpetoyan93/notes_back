@@ -269,7 +269,9 @@ class CollectionService {
     const collection = await this.requireVaultManager(companyId, collectionId, userId);
     const nextPermission: SharePermission = permission === "edit" ? "edit" : "view";
     if (audience === "all") {
+      const before = await this.getAccess(collectionId, userId);
       await collection.update({ companyShare: nextPermission });
+      if (!before) await this.recordSelfAccess(companyId, collectionId, userId, nextPermission, "all members");
       return { shared: [], failed: [] as { email: string; message: string }[] };
     }
     const list = [...new Set(emails.map((item) => item.trim().toLowerCase()).filter(Boolean))];
@@ -367,6 +369,10 @@ class CollectionService {
     if (!member || !collection || !managesIt) {
       throw Object.assign(new Error("You cannot share collections here"), { status: 403 });
     }
+    // The company requires 2FA and this person doesn't use it: no managing either (SEC06).
+    if ((await CompanyPolicyService.forUser(userId)).blocked.has(companyId)) {
+      throw Object.assign(new Error("Your company requires two-factor sign-in. Turn it on to manage vaults."), { status: 403 });
+    }
     return collection;
   }
 
@@ -447,7 +453,8 @@ class CollectionService {
     const next: SharePermission = permission === "edit" ? "edit" : "view";
     const existing = await CollectionShare.findOne({ where: { collectionId, sharedWithUserId: userId } });
     if (existing) {
-      await existing.update({ permission: next, expiresAt: null });
+      // An old or expired share they raise themselves shows as self-given.
+      await existing.update({ permission: next, expiresAt: null, ...(existing.manages ? {} : { source: "self" }) });
     } else {
       await CollectionShare.create({
         collectionId,
@@ -459,17 +466,32 @@ class CollectionService {
         source: "self",
       });
     }
+    await this.recordSelfAccess(companyId, collectionId, userId, next);
+    return { collectionId, permission: next };
+  }
+
+  /**
+   * An owner or admin who gave themselves a vault: by "Give me access", or another way (a group
+   * they're in, "all members"). Logged, and the vault's managers are told (ADR-002, SEC06).
+   */
+  async recordSelfAccess(companyId: number, collectionId: number, userId: number, permission: SharePermission, via?: string) {
     const { default: AuditService } = await import("./AuditService");
     const { default: NotificationService } = await import("./NotificationService");
-    await AuditService.record({ actorId: userId, action: "vault_self_granted", companyId, collectionId, details: { permission: next } });
+    await AuditService.record({
+      actorId: userId,
+      action: "vault_self_granted",
+      companyId,
+      collectionId,
+      details: { permission, ...(via ? { via } : {}) },
+    });
     const me = await User.findByPk(userId, { attributes: ["email"] });
+    const how = via ? ` (through ${via})` : "";
     for (const managerId of await this.otherManagers(companyId, collectionId, userId)) {
       await NotificationService.create(
         managerId,
-        `${me?.email || "An admin"} gave themselves ${next === "edit" ? "edit" : "view"} access to a vault you manage. Your 2keevo hands them its key.`
+        `${me?.email || "An admin"} gave themselves ${permission === "edit" ? "edit" : "view"} access to a vault you manage${how}. Your 2keevo hands them its key.`
       ).catch(() => undefined);
     }
-    return { collectionId, permission: next };
   }
 
   /** Make someone a vault manager or stop it (owners/admins or a manager); never the last one. */

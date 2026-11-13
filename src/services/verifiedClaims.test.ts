@@ -117,8 +117,9 @@ describe("invites sent to an address wait until it's confirmed", () => {
 
 describe("unconfirmed accounts can't be found or shared with by email", () => {
   it("search leaves them out", async () => {
-    const found = await UserService.searchUsers("acme", 9);
-    expect(found.map((user: any) => user.id)).toEqual([1]);
+    // Outside a company, search needs the exact address (SEC06).
+    expect((await UserService.searchUsers("olga@acme.com", 9)).map((user: any) => user.id)).toEqual([1]);
+    expect(await UserService.searchUsers("nia@acme.com", 9)).toEqual([]);
   });
 
   it("sharing a collection to an unconfirmed address says so", async () => {

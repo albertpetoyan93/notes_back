@@ -465,7 +465,7 @@ class NoteService {
     let whereClause: any;
 
     if (filters?.companyId) {
-      let companyCollections: { id: number }[] = [];
+      let companyCollections: { id: number; permission?: string | null }[] = [];
       try {
         companyCollections = await CollectionService.listForCompany(
           filters.companyId,
@@ -475,7 +475,8 @@ class NoteService {
         if (error?.status === 404 || error?.status === 403) return [];
         throw error;
       }
-      const ids = companyCollections.map((collection) => collection.id);
+      // Admins see every vault on the company page (permission null = no access): only opened ones list items (ADR-002, SEC06).
+      const ids = companyCollections.filter((collection) => collection.permission).map((collection) => collection.id);
       const selected =
         filters.collectionId && ids.includes(filters.collectionId)
           ? [filters.collectionId]
@@ -800,7 +801,11 @@ class NoteService {
     if (!owner) {
       throw Object.assign(new Error("Only the company's owner can export its items"), { status: 403 });
     }
-    const collections = await Collection.findAll({ where: { companyId }, attributes: ["id", "name", "encName"] });
+    // Only the vaults the owner can open: the role alone gives no content (ADR-002, SEC06).
+    const open = await CollectionService.openCompanyCollections(userId);
+    const collections = (await Collection.findAll({ where: { companyId }, attributes: ["id", "name", "encName"] })).filter(
+      (collection) => open.has(collection.id)
+    );
     const nameOf = new Map(collections.map((collection) => [collection.id, collectionLabel(collection)]));
     const noteIds = await CollectionService.noteIdsForCollections(collections.map((collection) => collection.id));
     const notes = noteIds.length
@@ -1409,6 +1414,12 @@ class NoteService {
         throw Object.assign(new Error("You can't change that item."), { status: 403 });
       }
       const note = access.note;
+      // The server can't read an end-to-end item; writing the passkey here would store it readable.
+      if (note.e2e) {
+        throw Object.assign(new Error("This item is end-to-end encrypted. Update the extension to save passkeys to it."), {
+          status: 409,
+        });
+      }
       if (isDecryptionFailure(note.content)) {
         throw Object.assign(
           new Error("This item could not be decrypted, so it cannot be changed."),

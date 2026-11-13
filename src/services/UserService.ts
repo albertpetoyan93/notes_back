@@ -55,43 +55,28 @@ class UserService {
       if (!ids.length) return [];
     }
 
+    // Typed % and _ are plain characters, not wildcards.
+    const text = q.replace(/[\\%_]/g, "\\$&");
+    // Inside a company: part of a colleague's name or address. Anywhere else only the exact
+    // email or username, so nobody can page through every 2keevo user (SEC06).
+    const match = ids
+      ? [
+          { email: { [Op.iLike]: `%${text}%` } },
+          { username: { [Op.iLike]: `%${text}%` } },
+          { fullName: { [Op.iLike]: `%${text}%` } },
+        ]
+      : [{ email: { [Op.iLike]: text } }, { username: { [Op.iLike]: text } }];
     return User.findAll({
       where: {
         id: ids ? { [Op.in]: ids } : { [Op.ne]: excludeUserId },
         // Unconfirmed accounts can't be found by an address they may not own (F15).
         emailVerifiedAt: { [Op.not]: null },
-        [Op.or]: [
-          { email: { [Op.iLike]: `%${q}%` } },
-          { username: { [Op.iLike]: `%${q}%` } },
-          { fullName: { [Op.iLike]: `%${q}%` } },
-        ],
+        [Op.or]: match,
       },
       attributes: ["id", "username", "email", "fullName"],
       limit: 8,
       order: [["username", "ASC"]],
     });
-  }
-
-  /**
-   * Update user profile
-   */
-  static async updateProfile(
-    userId: number,
-    data: { email?: string; fullName?: string; password?: string }
-  ) {
-    const user = await User.findByPk(userId);
-
-    if (!user) {
-      throw new Error("User not found");
-    }
-
-    await user.update({
-      email: data.email !== undefined ? data.email : user.email,
-      fullName: data.fullName !== undefined ? data.fullName : user.fullName,
-      password: data.password !== undefined ? data.password : user.password,
-    });
-
-    return user;
   }
 }
 
