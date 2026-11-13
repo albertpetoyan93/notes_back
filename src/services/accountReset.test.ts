@@ -304,13 +304,6 @@ describe("review minors", () => {
     });
     expect(db.users[0].passwordResetTokenHash).toBeNull();
   });
-
-  it("M3: turning on end-to-end encryption cancels an earlier password-reset link", async () => {
-    vi.spyOn(E2EAccountService as any, "checkPasswordForEnable").mockResolvedValue(undefined);
-    const user = await User.findByPk(3);
-    await E2EAccountService.enable(user as User, { password: "x" });
-    expect(db.users[0].passwordResetTokenHash).toBeNull();
-  });
 });
 
 describe("check", () => {

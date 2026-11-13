@@ -8,12 +8,6 @@ import UserSession from "../models/UserSession";
 import { PlanLimitError, planLimitBody } from "../services/EntitlementService";
 import E2EItemService, { e2eConflictBody, isE2EAnswer } from "../services/E2EItemService";
 
-// Only accounts that turned on end-to-end encryption may store sealed items.
-async function e2eAccount(userId: number) {
-  const user = await User.findByPk(userId, { attributes: ["id", "e2eEnabled"] });
-  return !!user?.e2eEnabled;
-}
-
 // Private keys go only to the browser extension's own session, not to the vault's.
 async function fromExtension(req: any) {
   const sessionId = req.user?.sessionId;
@@ -23,34 +17,6 @@ async function fromExtension(req: any) {
 }
 
 export default class NoteController {
-  /** Personal items not yet encrypted in the browser, readable, for it to encrypt. */
-  static e2ePending = async (req: any, res: Response) => {
-    try {
-      const userId = req.user?.id;
-      if (!(await e2eAccount(userId))) return res.status(403).json({ message: "End-to-end encryption is off." });
-      res.json(await E2EItemService.pending(userId));
-    } catch (error) {
-      console.error("Error listing items to encrypt:", error);
-      res.status(500).json({ message: "Error listing items to encrypt" });
-    }
-  };
-
-  /** Store items the browser encrypted, and delete their readable copies. */
-  static e2eMigrate = async (req: any, res: Response) => {
-    try {
-      const userId = req.user?.id;
-      if (!(await e2eAccount(userId))) return res.status(403).json({ message: "End-to-end encryption is off." });
-      const result = await E2EItemService.migrate(userId, req.body?.items);
-      if (result.moved) {
-        await AuditService.record({ actorId: userId, action: "items_encrypted", details: { count: result.moved }, req });
-      }
-      res.json(result);
-    } catch (error) {
-      console.error("Error storing encrypted items:", error);
-      res.status(500).json({ message: "Error storing encrypted items" });
-    }
-  };
-
   /** Sealed logins to fill, for the extension to open and match itself. */
   static e2eAutofill = async (req: any, res: Response) => {
     try {
@@ -58,22 +24,6 @@ export default class NoteController {
     } catch (error) {
       console.error("Error listing sealed logins:", error);
       res.status(500).json({ message: "Error listing logins" });
-    }
-  };
-
-  /** Make end-to-end items readable again, so they can be shared. */
-  static e2eUnseal = async (req: any, res: Response) => {
-    try {
-      const userId = req.user?.id;
-      const result = await E2EItemService.unseal(userId, req.body?.items, async (noteId) => {
-        const access = await NoteService.getNoteAccess(noteId, userId);
-        return access?.permission === "owner" || access?.permission === "edit";
-      });
-      res.json(result);
-    } catch (error: any) {
-      if (error?.status === 400) return res.status(400).json({ message: error.message });
-      console.error("Error unsealing items:", error);
-      res.status(500).json({ message: "Error unsealing items" });
     }
   };
 
@@ -103,37 +53,6 @@ export default class NoteController {
       res.status(500).json({ message: "Error finding passkeys" });
     }
   };
-
-  /** Save a passkey the extension made, on a chosen login or a new one. */
-  static savePasskey = async (req: any, res: Response) => {
-    try {
-      const userId = req.user?.id;
-      if (!userId) return res.status(401).json({ message: "Unauthorized" });
-      if (!(await fromExtension(req))) {
-        return res.status(403).json({ message: "Only the 2keevo extension can save passkeys." });
-      }
-      const result = await NoteService.savePasskey(userId, {
-        noteId: req.body?.noteId ?? null,
-        passkey: req.body?.passkey,
-      });
-      await AuditService.record({
-        actorId: userId,
-        action: result.created ? "item_created" : "item_updated",
-        noteId: result.noteId,
-        details: { passkey: String(req.body?.passkey?.rpId || "").slice(0, 200) },
-        req,
-      });
-      res.status(result.created ? 201 : 200).json(result);
-    } catch (error: any) {
-      const status = error?.status;
-      if (status === 400 || status === 403 || status === 409) {
-        return res.status(status).json({ message: error.message });
-      }
-      console.error("Error saving passkey:", error);
-      res.status(500).json({ message: "Error saving passkey" });
-    }
-  };
-
 
   static autofill = async (req: any, res: Response) => {
     try {
@@ -180,7 +99,6 @@ export default class NoteController {
 
       const notes = await NoteService.getNotes(userId, {
         category,
-        project,
         tag,
         search,
         isFavorite: isFavorite === "true",
@@ -237,31 +155,18 @@ export default class NoteController {
       const userId = req.user?.id;
 
       const {
-        title,
-        content,
         category,
-        project,
-        tags,
         isFavorite,
-        isEncrypted,
         collectionId,
         collectionIds,
         e2e,
         version,
         e2eKeys,
       } = req.body;
-      if (e2e && !(await e2eAccount(userId))) {
-        return res.status(403).json({ message: "End-to-end encryption is off." });
-      }
 
       const note = await NoteService.createNote(userId, {
-        title,
-        content,
         category,
-        project,
-        tags,
         isFavorite,
-        isEncrypted,
         collectionId,
         collectionIds,
         e2e,
@@ -280,7 +185,9 @@ export default class NoteController {
       if (isE2EAnswer(error)) return res.status(409).json(e2eConflictBody(error));
       // Rules people can act on (a company's password length, a collection they can't use).
       if ((error as any)?.status >= 400 && (error as any)?.status < 500) {
-        return res.status((error as any).status).json({ message: (error as any).message });
+        return res
+          .status((error as any).status)
+          .json({ message: (error as any).message, ...((error as any).code ? { code: (error as any).code } : {}) });
       }
       console.error("Error creating note:", error);
       res.status(500).json({ message: "Error creating note" });
@@ -329,25 +236,6 @@ export default class NoteController {
     }
   };
 
-  static importNotes = async (req: any, res: Response) => {
-    try {
-      const userId = req.user?.id;
-      if (!userId) return res.status(401).json({ message: "Unauthorized" });
-      const notes = Array.isArray(req.body) ? req.body : req.body?.notes;
-      const result = await NoteService.importNotes(userId, notes);
-      await AuditService.record({
-        actorId: userId,
-        action: "vault_imported",
-        details: { count: (result as any)?.imported },
-        req,
-      });
-      res.status(201).json(result);
-    } catch (error: any) {
-      console.error("Error importing notes:", error);
-      res.status(error.status || 500).json({ message: "Error importing notes" });
-    }
-  };
-
   // Toggle favorite for the current user
   static toggleFavorite = async (req: any, res: Response) => {
     try {
@@ -391,13 +279,8 @@ export default class NoteController {
       }
 
       const {
-        title,
-        content,
         category,
-        project,
-        tags,
         isFavorite,
-        isEncrypted,
         collectionId,
         collectionIds,
         encData,
@@ -406,13 +289,8 @@ export default class NoteController {
       } = req.body;
 
       const note = await NoteService.updateNote(noteId, userId, {
-        title,
-        content,
         category,
-        project,
-        tags,
         isFavorite,
-        isEncrypted,
         collectionId,
         collectionIds,
         encData,
@@ -575,22 +453,6 @@ export default class NoteController {
     }
   };
 
-  // Get all projects
-  static getProjects = async (req: any, res: Response) => {
-    try {
-      const userId = req.user?.id;
-      if (!userId) {
-        return res.status(401).json({ message: "Unauthorized" });
-      }
-
-      const projects = await NoteService.getProjects(userId);
-      res.json(projects);
-    } catch (error) {
-      console.error("Error fetching projects:", error);
-      res.status(500).json({ message: "Error fetching projects" });
-    }
-  };
-
   // Share a note with another user (or multiple)
   static shareNote = async (req: any, res: Response) => {
     try {
@@ -746,7 +608,7 @@ export default class NoteController {
         const me = await User.findByPk(userId, { attributes: ["username", "fullName"] });
         await NotificationService.create(
           result.ownerId,
-          `${me?.fullName || me?.username || "Someone"} removed "${result.title}" from their list`,
+          `${me?.fullName || me?.username || "Someone"} removed an item from their list`,
           noteId
         );
       }
@@ -850,30 +712,6 @@ export default class NoteController {
     } catch (error) {
       console.error("Error opening version:", error);
       res.status(500).json({ message: "Error opening version" });
-    }
-  };
-
-  static restoreVersion = async (req: any, res: Response) => {
-    try {
-      const noteId = Number(req.params.id);
-      const result = await NoteService.restoreVersion(
-        noteId,
-        Number(req.params.versionId),
-        req.user?.id
-      );
-      if (!result) return res.status(404).json({ message: "Version not found" });
-      await AuditService.record({
-        actorId: req.user?.id,
-        action: "item_version_restored",
-        noteId,
-        details: { versionId: result.version.id, versionDate: result.version.createdAt },
-        req,
-      });
-      res.json(result.note);
-    } catch (error: any) {
-      if (error?.status === 409) return res.status(409).json({ message: error.message });
-      console.error("Error restoring version:", error);
-      res.status(500).json({ message: "Error restoring version" });
     }
   };
 

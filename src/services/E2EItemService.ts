@@ -12,7 +12,6 @@ import Note from "../models/Note";
 import NoteShare from "../models/NoteShare";
 import NoteVersion from "../models/NoteVersion";
 import User from "../models/User";
-import { decryptContent, encryptContent, isDecryptionFailure } from "../util/encryption";
 import GroupService from "./GroupService";
 
 /**
@@ -29,8 +28,8 @@ import GroupService from "./GroupService";
  * The server can't make these copies. When an action needs new ones (sharing,
  * moving into a collection…) it answers 409 "e2e_keys_needed" with what's
  * missing; the browser makes them and sends the action again with "e2eKeys".
- * When someone involved has no keys (end-to-end encryption off), it answers
- * 409 "e2e_items": the browser makes those items readable, then retries.
+ * When someone involved can't get a key yet, it answers a plain 409: items
+ * are never made readable (stage 10.6).
  *
  * Owners' and admins' browsers also do background work ("tasks"): encrypt a
  * collection once everyone in it has keys, give the key to people who just
@@ -78,24 +77,20 @@ export interface KeyNeeds {
 const httpError = (message: string, status: number, extra: Record<string, unknown> = {}) =>
   Object.assign(new Error(message), { status, ...extra });
 
-/** Someone involved has no keys: the app makes these items readable and tries again. */
-export const e2eConflict = (noteIds: number[]) =>
-  httpError(
-    "Someone here hasn't turned on end-to-end encryption, so these items are shared readable.",
-    409,
-    { code: "e2e_items", noteIds }
-  );
+/**
+ * Someone involved can't get a key yet (no keys of their own, or the caller lacks the
+ * collection key). Items are never made readable for them (stage 10.6): a plain 409.
+ */
+export const e2eConflict = (_noteIds: number[]) =>
+  httpError("Some people with access can't open this item yet. Try again once they've signed in.", 409);
 
 const keysNeeded = (needs: KeyNeeds) =>
   httpError("New key copies are needed.", 409, { code: "e2e_keys_needed", needs });
 
 /** The 409 body for either answer. */
-export const e2eConflictBody = (error: any) =>
-  error.code === "e2e_keys_needed"
-    ? { message: error.message, code: error.code, needs: error.needs }
-    : { message: error.message, code: "e2e_items", noteIds: Array.isArray(error.noteIds) ? error.noteIds : [] };
+export const e2eConflictBody = (error: any) => ({ message: error.message, code: error.code, needs: error.needs });
 
-export const isE2EAnswer = (error: any) => error?.code === "e2e_items" || error?.code === "e2e_keys_needed";
+export const isE2EAnswer = (error: any) => error?.code === "e2e_keys_needed";
 
 export function assertEncData(value: unknown, name = "encrypted data"): string {
   const text = String(value || "");
@@ -783,271 +778,6 @@ class E2EItemService {
 
   // ---------------------------------------------------------------- moving existing items
 
-  private plainVersion(row: NoteVersion) {
-    let content: any = decryptContent(row.content);
-    if (typeof content === "string") {
-      try {
-        content = JSON.parse(content);
-      } catch {
-        /* Plain text content stays a string. */
-      }
-    }
-    return {
-      id: row.id,
-      title: row.title,
-      category: row.category,
-      tags: row.tags || [],
-      content,
-      changes: row.changes || [],
-    };
-  }
-
-  /**
-   * The owner's items that can move now, readable, for the browser to encrypt,
-   * with the key copies each one needs (shares, collections). Saved passkeys
-   * move too (the extension opens sealed items since stage 10.5). An item waits while someone who can reach it has no keys, or while one of
-   * its shared collections isn't encrypted yet.
-   */
-  async pending(userId: number) {
-    // Loaded here: NoteService depends on this service.
-    const { default: NoteService } = await import("./NoteService");
-    const own = await Note.findAll({
-      where: { userId, e2e: false },
-      order: [["id", "ASC"]],
-      paranoid: false,
-    });
-    const ownLinks = await this.linkedCollectionIds(own.map((note) => note.id));
-    const companyCollections = await this.companyCollectionIds([...new Set([...ownLinks.values()].flatMap((set) => [...set]))]);
-    // Work items move by current access (edit through the company), never because you made them.
-    const workIds = await NoteService.manageableWorkItemIds(userId);
-    const work = workIds.length
-      ? await Note.findAll({ where: { id: { [Op.in]: workIds }, e2e: false }, order: [["id", "ASC"]] })
-      : [];
-    const candidates = [
-      ...own.filter(
-        (note) => note.companyId == null && ![...(ownLinks.get(note.id) || [])].some((id) => companyCollections.has(id))
-      ),
-      ...work,
-    ].sort((a, b) => a.id - b.id);
-    const items = [];
-    let remaining = 0;
-    // Planned as if already end-to-end (a stand-in id for the item key), many
-    // at a time; each item then takes its own part of the plan.
-    const readable = candidates.filter((note) => !isDecryptionFailure(note.content));
-    const plans = new Map<number, ReturnType<typeof emptyNeeds>>();
-    for (let start = 0; start < readable.length; start += 500) {
-      const chunk = readable.slice(start, start + 500);
-      const { needs, blocked } = await this.plan(
-        userId,
-        chunk.map((note) => ({ id: note.id, userId: note.userId, companyId: note.companyId, e2eId: "" }) as Note)
-      );
-      const created = new Set(needs.collections.filter((entry) => entry.create).map((entry) => entry.collectionId));
-      for (const note of chunk) {
-        const noteItems = needs.items.filter((need) => need.noteId === note.id);
-        // Blocked, or waiting for a collection to get its key first.
-        if (blocked.has(note.id) || noteItems.some((need) => created.has(need.collectionId))) continue;
-        const ids = new Set(noteItems.map((need) => need.collectionId));
-        plans.set(note.id, {
-          ...emptyNeeds(),
-          shares: needs.shares.filter((need) => need.noteId === note.id),
-          items: noteItems,
-          collections: needs.collections.filter((entry) => ids.has(entry.collectionId)),
-        });
-      }
-    }
-    for (const note of readable) {
-      const needs = plans.get(note.id);
-      if (!needs) continue;
-      if (items.length >= BATCH) {
-        remaining += 1;
-        continue;
-      }
-      const versions = await NoteVersion.findAll({ where: { noteId: note.id }, order: [["id", "ASC"]] });
-      const readable = versions.map((row) => this.plainVersion(row));
-      if (readable.some((version) => isDecryptionFailure(version.content))) continue;
-      items.push({
-        id: note.id,
-        title: note.title,
-        content: note.content,
-        comment: note.comment || "",
-        project: note.project || null,
-        tags: note.tags || [],
-        category: note.category,
-        updatedAt: note.updatedAt,
-        versions: readable,
-        needs: {
-          shares: needs.shares.map(({ userId: recipient, publicKey }) => ({ userId: recipient, publicKey })),
-          collections: needs.collections.map(({ collectionId, keyVersion, myKey }) => ({ collectionId, keyVersion, myKey })),
-        },
-      });
-    }
-    return { items, remaining };
-  }
-
-  /** Store the browser-encrypted copies and delete the readable ones. */
-  async migrate(userId: number, input: unknown) {
-    const list = Array.isArray(input) ? input.slice(0, BATCH) : [];
-    let moved = 0;
-    const skipped: number[] = [];
-    // Loaded here: NoteService depends on this service.
-    const { default: NoteService } = await import("./NoteService");
-    for (const raw of list as any[]) {
-      const noteId = Number(raw?.id);
-      try {
-        // A work item moves for whoever can manage it now; it has no creator key copy.
-        const manage = await NoteService.manageAccess(noteId, userId);
-        if (!manage) {
-          skipped.push(noteId);
-          continue;
-        }
-        const sealed = assertSealed(raw, { work: manage.work });
-        const versions = Array.isArray(raw?.versions) ? raw.versions : [];
-        const shareKeys = (Array.isArray(raw?.shares) ? raw.shares : []).map((entry: any) => ({
-          userId: Number(entry?.userId),
-          wrappedKey: assertKey(entry?.wrappedKey, SEALED_KEY, "shared key"),
-        }));
-        const collectionKeys = (Array.isArray(raw?.collections) ? raw.collections : []).map((entry: any) => ({
-          collectionId: Number(entry?.collectionId),
-          keyVersion: Number(entry?.keyVersion),
-          wrappedKey: assertKey(entry?.wrappedKey, ITEM_KEY, "item key"),
-        }));
-        const done = await sequelize.transaction(async (transaction) => {
-          const note = await Note.findOne({
-            where: { id: noteId },
-            paranoid: false,
-            transaction,
-            lock: transaction.LOCK.UPDATE,
-          });
-          if (!note || note.e2e) return false;
-          // Changed since the browser read it (an edit from another device):
-          // the encrypted copy would undo it. Skipped; it moves next time.
-          const readAt = new Date(raw?.updatedAt).getTime();
-          if (!Number.isFinite(readAt) || new Date(note.updatedAt).getTime() !== readAt) return false;
-          // Every way in must be covered by what the browser sent.
-          const { needs, blocked } = await this.plan(userId, [
-            { id: note.id, userId: note.userId, companyId: note.companyId, e2eId: "" } as Note,
-          ]);
-          if (blocked.size || needs.collections.some((entry) => entry.create)) return false;
-          const coversShares = needs.shares.every((need) => shareKeys.some((key: any) => key.userId === need.userId));
-          const coversCollections = needs.items.every((need) =>
-            collectionKeys.some((key: any) => key.collectionId === need.collectionId && key.keyVersion === need.keyVersion)
-          );
-          if (!coversShares || !coversCollections) return false;
-
-          const encrypted = new Map<number, string>();
-          for (const version of versions) {
-            encrypted.set(Number(version?.id), assertEncData(version?.encData, "version"));
-          }
-          const rows = await NoteVersion.findAll({ where: { noteId }, attributes: ["id"], transaction });
-          for (const row of rows) {
-            const encData = encrypted.get(row.id);
-            // A version the browser didn't send would stay readable: drop it.
-            if (!encData) {
-              await row.destroy({ transaction });
-              continue;
-            }
-            await NoteVersion.update(
-              { content: encData, e2e: true, title: "", tags: [], changes: [] },
-              { where: { id: row.id }, transaction }
-            );
-          }
-          await ItemKey.destroy({ where: { noteId }, transaction });
-          for (const key of shareKeys.filter((key: any) => needs.shares.some((need) => need.userId === key.userId))) {
-            await ItemKey.create({ noteId, containerType: "user", containerId: key.userId, wrappedKey: key.wrappedKey }, { transaction });
-          }
-          for (const key of collectionKeys.filter((key: any) => needs.items.some((need) => need.collectionId === key.collectionId))) {
-            await ItemKey.create(
-              { noteId, containerType: "collection", containerId: key.collectionId, keyVersion: key.keyVersion, wrappedKey: key.wrappedKey },
-              { transaction }
-            );
-          }
-          // silent: the item didn't change, so its "updated" date (sorting,
-          // old-password health, leak results) stays as it was.
-          await note.update({ ...BLANK_FIELDS, ...sealed, e2e: true }, { transaction, silent: true });
-          await this.forgetTitles(noteId, transaction);
-          return true;
-        });
-        if (done) moved += 1;
-        else skipped.push(noteId);
-      } catch (error: any) {
-        if (error?.status !== 400) console.error("Could not move item", noteId, error?.message || error);
-        skipped.push(noteId);
-      }
-    }
-    return { moved, skipped };
-  }
-
-  /** The activity log copied item titles; an end-to-end item keeps none. */
-  private async forgetTitles(noteId: number, transaction?: any) {
-    await sequelize.query(
-      `UPDATE "audit_events" SET details = details - 'title' WHERE "noteId" = :noteId AND details ? 'title'`,
-      { replacements: { noteId }, transaction }
-    );
-  }
-
-  /**
-   * Make end-to-end items readable again, to share them with someone who has
-   * no keys. The browser sends them decrypted, with their versions. Anyone
-   * who may edit an item may do this.
-   */
-  async unseal(userId: number, input: unknown, canEdit: (noteId: number) => Promise<boolean>) {
-    const list = Array.isArray(input) ? input.slice(0, BATCH) : [];
-    const done: number[] = [];
-    for (const raw of list as any[]) {
-      const noteId = Number(raw?.id);
-      const title = String(raw?.title ?? "").trim().slice(0, 255);
-      if (!title || !raw?.content || typeof raw.content !== "object") {
-        throw httpError("Each item needs its title and content.", 400);
-      }
-      if (!(await canEdit(noteId))) continue;
-      const category = CATEGORIES.includes(raw?.category) ? raw.category : undefined;
-      await sequelize.transaction(async (transaction) => {
-        const note = await Note.findOne({ where: { id: noteId, e2e: true }, paranoid: false, transaction });
-        if (!note) return;
-        const versions = new Map<number, any>(
-          (Array.isArray(raw?.versions) ? raw.versions : []).map((version: any) => [Number(version?.id), version])
-        );
-        const rows = await NoteVersion.findAll({ where: { noteId, e2e: true }, attributes: ["id"], transaction });
-        for (const row of rows) {
-          const version = versions.get(row.id);
-          if (!version || !version.content || typeof version.content !== "object") {
-            await row.destroy({ transaction });
-            continue;
-          }
-          await NoteVersion.update(
-            {
-              e2e: false,
-              title: String(version.title || "").slice(0, 255),
-              category: CATEGORIES.includes(version.category) ? version.category : note.category,
-              tags: Array.isArray(version.tags) ? version.tags.map(String).slice(0, 20) : [],
-              changes: Array.isArray(version.changes) ? version.changes.map(String).slice(0, 50) : [],
-              content: encryptContent(JSON.stringify(version.content)),
-            },
-            { where: { id: row.id }, transaction }
-          );
-        }
-        await ItemKey.destroy({ where: { noteId }, transaction });
-        await note.update(
-          {
-            title,
-            content: raw.content,
-            comment: String(raw?.comment || "").slice(0, 255),
-            project: raw?.project ? String(raw.project).slice(0, 100) : null,
-            tags: Array.isArray(raw?.tags) ? raw.tags.map(String).filter(Boolean).slice(0, 20) : [],
-            ...(category ? { category } : {}),
-            e2e: false,
-            e2eId: null,
-            itemKey: null,
-            encData: null,
-          },
-          { transaction, silent: true }
-        );
-        done.push(noteId);
-      });
-    }
-    return { unsealed: done };
-  }
-
   // ---------------------------------------------------------------- background work for owners and admins
 
   /** Collections this person manages: their own, and every collection of companies they own or administer. */
@@ -1243,8 +973,6 @@ class E2EItemService {
           { encName: assertEncName(raw?.encName), nameKey: want, ...(collection.encName ? {} : { name: placeholderName() }) },
           { where: { id: collectionId } }
         );
-        // Items no longer carry the readable name as their "project".
-        await Note.update({ project: null }, { where: { collectionId }, paranoid: false });
       }
       updated += 1;
     }

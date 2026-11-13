@@ -15,17 +15,6 @@ import SessionService from "./SessionService";
  * the master password or anything that opens the vault.
  */
 
-/**
- * When every account must have end-to-end encryption on (stage 10.6), from
- * E2E_DEADLINE (an ISO date). Before it the app asks; after it, it insists.
- */
-export function e2eDeadline(): string | null {
-  const value = String(process.env.E2E_DEADLINE || "").trim();
-  if (!value) return null;
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? null : date.toISOString();
-}
-
 export class E2EError extends Error {
   constructor(message: string, public status = 400) {
     super(message);
@@ -112,10 +101,9 @@ const madeUpSalt = (email: string) =>
 
 class E2EAccountService {
   /**
-   * What the browser needs before signing in. Unknown emails get made-up
-   * settings, answered like an end-to-end account (the sign-in then fails as
-   * any wrong password does). Only accounts that haven't turned end-to-end
-   * encryption on yet answer `e2e: false`.
+   * What the browser needs before signing in. Every account is end-to-end
+   * (stage 10.6); unknown emails, or an account without keys, get made-up
+   * settings, so the answer never tells whether an account exists.
    */
   async prelogin(email: string) {
     const address = String(email || "").trim();
@@ -125,8 +113,9 @@ class E2EAccountService {
     const user =
       (await User.findOne({ where: { email: address }, attributes })) ||
       (await User.findOne({ where: { email: { [Op.iLike]: address.replace(/[\\%_]/g, "\\$&") } }, attributes }));
-    if (!user) return { e2e: true, kdf: { ...DEFAULT_KDF, salt: madeUpSalt(address) } };
-    if (!user.e2eEnabled || !user.kdfSalt || !user.kdfParams) return { e2e: false };
+    if (!user || !user.e2eEnabled || !user.kdfSalt || !user.kdfParams) {
+      return { e2e: true, kdf: { ...DEFAULT_KDF, salt: madeUpSalt(address) } };
+    }
     return { e2e: true, kdf: { ...user.kdfParams, salt: user.kdfSalt } };
   }
 
@@ -141,10 +130,6 @@ class E2EAccountService {
     };
   }
 
-  /**
-   * Turn it on. The current password proves it's the owner; from now on the
-   * server checks the derived sign-in key instead and forgets the password.
-   */
   /** The keys made in the browser, checked: what an end-to-end account stores. */
   async checkedBundle(input: any) {
     return {
@@ -157,31 +142,6 @@ class E2EAccountService {
       recoveryProtectedUserKey: checkWrapped(input?.recoveryProtectedUserKey, "recovery copy"),
       recoveryAuthHash: await hash(checkSecret(input?.recoveryAuth, "recovery proof")),
     };
-  }
-
-  /**
-   * Before turning it on: the account's current password. Checked on its own
-   * first, so a wrong one is caught before the browser makes keys and shows a
-   * recovery key that would never be used.
-   */
-  async checkPasswordForEnable(user: User, password: unknown) {
-    if (user.e2eEnabled) throw new E2EError("End-to-end encryption is already on.");
-    const current = String(password || "");
-    if (!current || !(await user.comparePassword(current))) {
-      throw new E2EError("Your current password isn't right.", 401);
-    }
-  }
-
-  async enable(user: User, input: any) {
-    await this.checkPasswordForEnable(user, input?.password);
-    const values = await this.checkedBundle(input);
-    // A reset link emailed before this would now reset the end-to-end account: it stops working.
-    await user.update({ ...values, e2eEnabled: true, e2eSince: new Date(), passwordResetTokenHash: null, passwordResetExpires: null });
-    // New keys: copies made for any earlier ones can't be opened. Without them,
-    // the key tasks make new ones (shares, collection keys).
-    await UserPasskey.update({ prfUserKey: null }, { where: { userId: user.id } });
-    await CollectionKey.destroy({ where: { userId: user.id } });
-    await ItemKey.destroy({ where: { containerType: "user", containerId: user.id } });
   }
 
   private async proveMasterPassword(user: User, authKey: unknown) {

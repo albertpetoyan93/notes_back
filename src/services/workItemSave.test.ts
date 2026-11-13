@@ -27,7 +27,7 @@ async function failure(promise: Promise<unknown>) {
 }
 
 function fakeNote(fields: Record<string, unknown>) {
-  const note = { id: 5, userId: 3, e2e: false, companyId: null, updatedAt: new Date(), ...fields } as any;
+  const note = { id: 5, userId: 3, e2e: true, companyId: null, updatedAt: new Date(), ...fields } as any;
   note.update = vi.fn(async () => note);
   note.toJSON = () => ({ ...note });
   return note;
@@ -53,9 +53,7 @@ beforeEach(() => {
   vi.spyOn(Note, "create").mockResolvedValue(fakeNote({}) as never);
   vi.spyOn(Note, "findByPk").mockResolvedValue(null as never);
   vi.spyOn(NoteService as any, "getFavoriteNoteIds").mockResolvedValue(new Set());
-  vi.spyOn(NoteService as any, "keepVersion").mockResolvedValue(undefined);
   vi.spyOn(NoteService as any, "keepSealedVersion").mockResolvedValue(undefined);
-  vi.spyOn(NoteService as any, "assertPasswordRule").mockResolvedValue(undefined);
 });
 
 afterEach(() => {
@@ -66,8 +64,6 @@ describe("creating a work item", () => {
   it("refuses an end-to-end company item that carries a personal key copy", async () => {
     const err = await failure(
       NoteService.createNote(3, {
-        title: "",
-        content: {},
         category: "login",
         collectionIds: [1],
         e2e: { e2eId: E2E_ID, itemKey: ITEM_KEY, encData: ENC_DATA },
@@ -81,7 +77,7 @@ describe("creating a work item", () => {
 
   it("refuses a mix of personal and company collections", async () => {
     const err = await failure(
-      NoteService.createNote(3, { title: "x", content: {}, category: "note", collectionIds: [1, 9] })
+      NoteService.createNote(3, { category: "note", collectionIds: [1, 9], e2e: { e2eId: E2E_ID, encData: ENC_DATA } as any })
     );
     expect(err.status).toBe(400);
     expect(Note.create).not.toHaveBeenCalled();
@@ -89,8 +85,6 @@ describe("creating a work item", () => {
 
   it("saves an end-to-end company item without a creator copy, owned by the company", async () => {
     await NoteService.createNote(3, {
-      title: "",
-      content: {},
       category: "login",
       collectionIds: [1],
       e2e: { e2eId: E2E_ID, encData: ENC_DATA } as any,
@@ -113,8 +107,6 @@ describe("creating a work item", () => {
     vi.spyOn(E2EItemService, "storeNewItemKeys").mockRejectedValue(new Error("db down"));
     await expect(
       NoteService.createNote(3, {
-        title: "",
-        content: {},
         category: "login",
         collectionIds: [1],
         e2e: { e2eId: E2E_ID, encData: ENC_DATA } as any,
@@ -126,27 +118,15 @@ describe("creating a work item", () => {
     expect(rolledBack).toBe(true);
   });
 
-  it("marks a readable item in a company collection as the company's", async () => {
-    await NoteService.createNote(3, { title: "x", content: {}, category: "note", collectionIds: [2] });
-    expect(Note.create).toHaveBeenCalledWith(expect.objectContaining({ companyId: 7 }));
-  });
-
-  it("keeps a readable personal item personal", async () => {
-    await NoteService.createNote(3, { title: "x", content: {}, category: "note", collectionIds: [9] });
-    expect(Note.create).toHaveBeenCalledWith(expect.objectContaining({ companyId: null }));
-  });
-
   it("names the rule when personal and company collections are mixed", async () => {
     const err = await failure(
-      NoteService.createNote(3, { title: "x", content: {}, category: "note", collectionIds: [9, 2] })
+      NoteService.createNote(3, { category: "note", collectionIds: [9, 2], e2e: { e2eId: E2E_ID, encData: ENC_DATA } as any })
     );
     expect(err.message).toBe("A company item can only be in that company's collections.");
   });
 
   it("keeps a personal item personal, with its creator copy", async () => {
     await NoteService.createNote(3, {
-      title: "",
-      content: {},
       category: "login",
       collectionIds: [9],
       e2e: { e2eId: E2E_ID, itemKey: ITEM_KEY, encData: ENC_DATA },
@@ -213,14 +193,6 @@ describe("changing a work item's collections", () => {
     expect(CollectionService.setNoteCollections).not.toHaveBeenCalled();
   });
 
-  it("moves a readable personal item into a company", async () => {
-    const note = fakeNote({});
-    vi.spyOn(NoteService, "getNoteAccess").mockResolvedValue({ note, permission: "owner" } as never);
-    await NoteService.updateNote(5, 3, { collectionIds: [1] });
-    expect(note.update).toHaveBeenCalledWith({ companyId: 7 }, expect.anything());
-    expect(AuditService.record).toHaveBeenCalledWith(expect.objectContaining({ action: "item_moved_to_company" }));
-  });
-
   it("refuses to take a work item out of its company", async () => {
     const note = fakeNote({ e2e: true, companyId: 7 });
     vi.spyOn(NoteService, "getNoteAccess").mockResolvedValue({ note, permission: "edit" } as never);
@@ -231,7 +203,7 @@ describe("changing a work item's collections", () => {
     expect(note.update).not.toHaveBeenCalled();
   });
 
-  it("refuses to take a readable work item out of its company", async () => {
+  it("refuses to take a work item out of its company", async () => {
     const note = fakeNote({ companyId: 7 });
     vi.spyOn(NoteService, "getNoteAccess").mockResolvedValue({ note, permission: "edit" } as never);
     const err = await failure(NoteService.updateNote(5, 4, { collectionIds: [9] }));
@@ -497,7 +469,7 @@ describe("deleting a company collection", () => {
 });
 
 describe("items in company collections without a companyId (left by the backfill)", () => {
-  const legacy = () => fakeNote({ e2e: false, companyId: null, title: "x", content: {}, tags: [] });
+  const legacy = () => fakeNote({ e2e: true, companyId: null, itemKey: null });
 
   it("canManage takes the work flag: an editor manages one, its creator alone doesn't", () => {
     expect(canManage({ note: { companyId: null, userId: 3 }, permission: "edit", work: true }, 4)).toBe(true);
@@ -566,11 +538,11 @@ describe("items in company collections without a companyId (left by the backfill
 
   it("is left out of the personal export, like any work item", async () => {
     vi.spyOn(Note, "findAll").mockResolvedValue([
-      fakeNote({ id: 5, companyId: 7, title: "work", content: {} }),
-      fakeNote({ id: 6, companyId: null, title: "mine", content: {} }),
+      fakeNote({ id: 5, companyId: 7, e2eId: "work" }),
+      fakeNote({ id: 6, companyId: null, e2eId: "mine" }),
     ] as never);
     const result = await NoteService.exportNotes(3);
-    expect(result.notes.map((note: any) => note.title)).toEqual(["mine"]);
+    expect(result.notes.map((note: any) => note.e2eId)).toEqual(["mine"]);
   });
 });
 
@@ -587,8 +559,6 @@ describe("collectionsByNoteId legacy links", () => {
 describe("a new work item and a collection key replaced meanwhile", () => {
   const create = () =>
     NoteService.createNote(3, {
-      title: "",
-      content: {},
       category: "login",
       collectionIds: [1],
       e2e: { e2eId: E2E_ID, encData: ENC_DATA } as any,
@@ -625,11 +595,4 @@ describe("a refused move doesn't save the edit", () => {
     expect(note.update).not.toHaveBeenCalledWith(expect.objectContaining({ encData: ENC_DATA }));
   });
 
-  it("readable item: the edit isn't saved when linking fails", async () => {
-    vi.mocked(CollectionService.setNoteCollections).mockRejectedValue(new Error("db down"));
-    const note = fakeNote({ title: "old", content: {}, tags: [] });
-    vi.spyOn(NoteService, "getNoteAccess").mockResolvedValue({ note, permission: "owner" } as never);
-    await expect(NoteService.updateNote(5, 3, { title: "new", collectionIds: [1] })).rejects.toThrow("db down");
-    expect(note.update).not.toHaveBeenCalledWith(expect.objectContaining({ title: "new" }));
-  });
 });

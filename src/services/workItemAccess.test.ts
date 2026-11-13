@@ -260,58 +260,6 @@ describe("a legacy item still in company collections (no companyId)", () => {
   });
 });
 
-describe("moving readable work items to end-to-end", () => {
-  const E2E_ID = "a".repeat(22);
-  const ENC_DATA = `e2e1.${"d".repeat(16)}.${"e".repeat(30)}`;
-  const savedAt = new Date("2026-11-01T10:00:00Z");
-  let note: any;
-
-  beforeEach(() => {
-    note = fakeNote({ e2e: false, itemKey: null, title: "Router", content: { mainContent: "" }, updatedAt: savedAt });
-    note.update = vi.fn(async () => note);
-    vi.spyOn(Note, "findAll").mockImplementation((async (options: any) =>
-      options.where.userId !== undefined ? [note].filter((row) => row.userId === options.where.userId) : [note]) as never);
-    vi.spyOn(Note, "findOne").mockResolvedValue(note as never);
-    vi.spyOn(CollectionService, "noteIdsForCollections").mockResolvedValue([5] as never);
-    vi.spyOn(NoteShare, "findAll").mockResolvedValue([] as never);
-    vi.spyOn(CollectionNote, "findAll").mockResolvedValue([] as never);
-    vi.spyOn(NoteVersion, "findAll").mockResolvedValue([] as never);
-    vi.spyOn(E2EItemService, "plan").mockResolvedValue({
-      needs: { collections: [], items: [], shares: [] },
-      blocked: new Set(),
-    } as never);
-    vi.spyOn(sequelize, "transaction").mockImplementation((async (fn: any) => fn({ LOCK: { UPDATE: "UPDATE" } })) as never);
-    vi.spyOn(sequelize, "query").mockResolvedValue([[], 0] as never);
-    vi.spyOn(ItemKey, "destroy").mockResolvedValue(0 as never);
-  });
-
-  const sealed = () => [{ id: 5, e2eId: E2E_ID, encData: ENC_DATA, updatedAt: savedAt.toISOString() }];
-
-  it("skips its suspended creator", async () => {
-    companyShare = "edit";
-    membership.status = "suspended";
-    expect((await E2EItemService.pending(3)).items).toEqual([]);
-    expect(await E2EItemService.migrate(3, sealed())).toEqual({ moved: 0, skipped: [5] });
-    expect(note.update).not.toHaveBeenCalled();
-  });
-
-  it("skips its view-only creator", async () => {
-    expect((await E2EItemService.pending(3)).items).toEqual([]);
-    expect(await E2EItemService.migrate(3, sealed())).toEqual({ moved: 0, skipped: [5] });
-  });
-
-  it("is offered to an active editor who didn't make it, with no creator key copy", async () => {
-    companyShare = "edit";
-    membership.userId = 4;
-    expect((await E2EItemService.pending(4)).items.map((item) => item.id)).toEqual([5]);
-    expect(await E2EItemService.migrate(4, sealed())).toEqual({ moved: 1, skipped: [] });
-    expect(note.update).toHaveBeenCalledWith(
-      expect.objectContaining({ e2e: true, itemKey: null, encData: ENC_DATA }),
-      expect.anything()
-    );
-  });
-});
-
 describe("a work item in the trash", () => {
   let trashed: any;
   beforeEach(() => {

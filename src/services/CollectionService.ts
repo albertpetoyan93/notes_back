@@ -855,8 +855,8 @@ class CollectionService {
         ...(linkedIds.length ? { id: { [Op.notIn]: linkedIds } } : {}),
       },
       // End-to-end items have no readable title: the browser opens encData.
-      attributes: ["id", "title", "collectionId", "e2e", "e2eId", "itemKey", "encData"],
-      order: [["title", "ASC"]],
+      attributes: ["id", "collectionId", "e2e", "e2eId", "itemKey", "encData"],
+      order: [["updatedAt", "DESC"]],
     });
     const linked = await this.collectionsByNoteId(notes.map((note) => note.id));
     return notes.filter((note) => !isWorkItem(note, linked.get(note.id)));
@@ -986,8 +986,8 @@ class CollectionService {
     });
     const note = await Note.findByPk(noteId, { transaction });
     if (note && !note.collectionId) {
-      // An encrypted name isn't copied onto the item.
-      await note.update({ collectionId, project: name || null }, { transaction });
+      // The collection's name isn't copied onto the item: the server keeps no readable item fields (stage 10.6).
+      await note.update({ collectionId }, { transaction });
     }
   }
 

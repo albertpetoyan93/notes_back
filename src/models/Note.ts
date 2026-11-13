@@ -1,10 +1,5 @@
 import { DataTypes, Model, Optional } from "sequelize";
 import sequelize from "../configs/DB/sequelize";
-import {
-  decryptContent,
-  encryptContent,
-  isDecryptionFailure,
-} from "../util/encryption";
 
 interface NoteAttributes {
   id: number;
@@ -164,48 +159,7 @@ Note.init(
     tableName: "notes",
     timestamps: true,
     paranoid: true,
-    hooks: {
-      // Every item is encrypted at rest; SSH keys and DB logins are as secret as passwords.
-      beforeValidate: async (note: Note) => {
-        note.isEncrypted = true;
-      },
-      // Encrypt before saving to database
-      beforeCreate: async (note: Note) => {
-        if (isDecryptionFailure(note.content)) {
-          throw new Error("Content could not be decrypted");
-        }
-        if (note.content) {
-          note.setDataValue("content", encryptContent(note.content));
-        }
-      },
-      beforeUpdate: async (note: Note) => {
-        if (!note.changed("content")) return;
-        // afterFind put a placeholder here because decryption failed. Keep the
-        // stored ciphertext so saving other fields cannot wipe the item.
-        if (isDecryptionFailure(note.content)) {
-          note.setDataValue("content", note.previous("content") as any);
-          return;
-        }
-        note.setDataValue("content", encryptContent(note.content));
-      },
-      // Decrypt after retrieving from database
-      afterFind: (result: Note | Note[] | null) => {
-        if (!result) return;
-
-        const notes = Array.isArray(result) ? result : [result];
-
-        notes.forEach((note) => {
-          if (note && note.isEncrypted && note.getDataValue("content")) {
-            try {
-              const decrypted = decryptContent(note.getDataValue("content"));
-              note.setDataValue("content", decrypted);
-            } catch (error) {
-              console.error("Error decrypting content:", error);
-            }
-          }
-        });
-      },
-    },
+    // No hooks: items are sealed in the browser; the server never encrypts or decrypts them (stage 10.6).
   }
 );
 

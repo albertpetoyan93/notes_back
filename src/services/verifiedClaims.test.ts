@@ -186,13 +186,4 @@ describe("mid review: an address gives nothing to an unconfirmed account, even w
     expect(await StaffService.roleOf(6)).toBe("admin");
     vi.unstubAllEnvs();
   });
-
-  it("I5: a password reset by email link confirms the address", async () => {
-    db.users.find((user) => user.id === 6)!.passwordResetTokenHash = sha256("reset");
-    db.users.find((user) => user.id === 6)!.passwordResetExpires = new Date(Date.now() + 3600_000);
-    vi.spyOn(SessionService, "revokeAll").mockResolvedValue(undefined as never);
-    vi.spyOn(UserPasskey, "update").mockResolvedValue([0] as never);
-    await AuthService.resetPassword("reset", "a-new-password-123");
-    expect(db.users.find((user) => user.id === 6)!.emailVerifiedAt).toBeInstanceOf(Date);
-  });
 });

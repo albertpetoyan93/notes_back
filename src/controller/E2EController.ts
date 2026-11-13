@@ -28,7 +28,7 @@ const tell = (user: User, what: string) =>
   EmailService.sendSecurityNotice({ to: user.email, what }).catch(() => undefined);
 
 export default class E2EController {
-  /** Public. Key settings for signing in; `e2e: false` for everyone else. */
+  /** Public. Key settings for signing in (made up for unknown addresses). */
   static prelogin = async (req: Request, res: Response, next: NextFunction) => {
     try {
       res.send(await E2EAccountService.prelogin(String(req.body?.email || "")));
@@ -60,31 +60,6 @@ export default class E2EController {
   static resetAccount = async (req: Request, res: Response, next: NextFunction) => {
     try {
       res.send(await AccountResetService.reset(req.body?.token, req.body));
-    } catch (error) {
-      fail(error, res, next);
-    }
-  };
-
-  /** Step 1 of turning it on: is this the account's current password? Nothing is changed. */
-  static checkPassword = async (req: AuthedRequest, res: Response, next: NextFunction) => {
-    try {
-      const user = await signedInUser(req, res);
-      if (!user) return;
-      await E2EAccountService.checkPasswordForEnable(user, req.body?.password);
-      res.send({ ok: true });
-    } catch (error) {
-      fail(error, res, next);
-    }
-  };
-
-  static enable = async (req: AuthedRequest, res: Response, next: NextFunction) => {
-    try {
-      const user = await signedInUser(req, res);
-      if (!user) return;
-      await E2EAccountService.enable(user, req.body);
-      await AuditService.record({ actorId: user.id, action: "e2e_enabled", req });
-      tell(user, "End-to-end encryption was turned on. Your password is now your master password.");
-      res.send({ keys: E2EAccountService.bundle(user) });
     } catch (error) {
       fail(error, res, next);
     }

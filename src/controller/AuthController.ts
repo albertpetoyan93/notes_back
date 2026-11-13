@@ -1,6 +1,6 @@
 import { NextFunction, Request, Response } from "express";
 import HttpStatusCodes from "../common/HttpStatusCodes";
-import AuthService, { E2E_REQUIRED, MASTER_RESET_REFUSED } from "../services/AuthService";
+import AuthService, { E2E_REQUIRED } from "../services/AuthService";
 import { AuthRequest } from "@src/types";
 import UserService from "@src/services/UserService";
 import EmailVerificationService from "@src/services/EmailVerificationService";
@@ -12,7 +12,7 @@ import EmailService from "@src/services/EmailService";
 import logger from "jet-logger";
 import AuditService from "@src/services/AuditService";
 import CompanyPolicyService from "@src/services/CompanyPolicyService";
-import E2EAccountService, { E2EError, e2eDeadline } from "@src/services/E2EAccountService";
+import E2EAccountService, { E2EError } from "@src/services/E2EAccountService";
 import { parseExtensionVersion } from "@src/services/admin/extensionVersion";
 import SignupSourceService from "@src/services/SignupSourceService";
 
@@ -263,33 +263,6 @@ export default class AuthController {
       res.status(HttpStatusCodes.OK).send({ message });
     } catch (e) {
       next(e);
-    }
-  };
-
-  static resetPassword = async (
-    req: Request,
-    res: Response,
-    next: NextFunction
-  ) => {
-    try {
-      const resetUserId = await AuthService.resetPassword(
-        req.body?.token,
-        req.body?.password
-      );
-      await AuditService.record({ actorId: resetUserId, action: "password_reset", req });
-      res.status(HttpStatusCodes.OK).send({
-        message: "Password updated. Sign in with the new password.",
-      });
-    } catch (e: any) {
-      if (
-        e.message === "This reset link is invalid or has expired." ||
-        e.message === "Password must be at least 6 characters." ||
-        e.message === MASTER_RESET_REFUSED
-      ) {
-        res.status(HttpStatusCodes.BAD_REQUEST).send({ message: e.message });
-      } else {
-        next(e);
-      }
     }
   };
 
@@ -644,7 +617,6 @@ export default class AuthController {
         emailVerified: !!user.emailVerifiedAt,
         locked: Boolean((req.user as { locked?: boolean } | undefined)?.locked),
         // Accounts without end-to-end encryption must turn it on by then (E2E_DEADLINE).
-        ...(!user.e2eEnabled && e2eDeadline() ? { e2eDeadline: e2eDeadline() } : {}),
       });
     } catch (e) {
       next(e);

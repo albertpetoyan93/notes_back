@@ -12,54 +12,12 @@ import NotificationService from "./NotificationService";
 import CollectionService, { type CollectionChange } from "./CollectionService";
 import { Op } from "sequelize";
 import sequelize from "../configs/DB/sequelize";
-import { isDecryptionFailure } from "../util/encryption";
 import AccessService from "./AccessService";
 import EntitlementService from "./EntitlementService";
-import VersionService, { type ItemState } from "./VersionService";
+import VersionService from "./VersionService";
 import CompanyPolicyService from "./CompanyPolicyService";
 import E2EItemService, { BLANK_FIELDS, assertEncData, assertSealed, collectionLabel } from "./E2EItemService";
-import {
-  addPasskey,
-  cleanOnCreate,
-  cleanPasskey,
-  mergeOnUpdate,
-  rpIdMatchesHost,
-  storedPasskeys,
-  withoutPrivateKeys,
-} from "../util/passkeyContent";
-import { matchesHost, normalizeHost } from "./hostMatch";
 import { isWorkItem, owningCompany } from "./workItems";
-
-// An authenticator (TOTP) key field. Same rule as the vault app (utils/totp.ts).
-// None of these contain "pass", so a key is never taken for a password.
-const TOTP_LABEL = /^(2fa|mfa|totp|otp|authenticator|two[- ]?factor)( (key|secret|code|seed|uri|url|link))?$/i;
-
-function isTotpFieldLabel(label: unknown) {
-  return TOTP_LABEL.test(String(label || "").trim());
-}
-
-// Recovery (backup) codes for a site. Same rule as utils/recoveryCodes.ts.
-const RECOVERY_LABEL = /^((2fa|mfa|two[- ]?factor) )?(recovery|backup)( codes?| keys?)?$/i;
-
-/** Health flags for a personal login; `breached` is how often it was seen in leaks. */
-export interface PasswordHealth {
-  weak: boolean;
-  reused: boolean;
-  stale: boolean;
-  breached: number;
-}
-
-// Same rule as the vault app (utils/secretField.ts): these values stay hidden.
-function isSecretFieldLabel(label: unknown) {
-  const name = String(label || "").trim().toLowerCase();
-  return (
-    name.includes("pass") ||
-    name === "cvv" ||
-    name === "pin" ||
-    isTotpFieldLabel(name) ||
-    RECOVERY_LABEL.test(name)
-  );
-}
 
 interface NoteFilters {
   category?: string;
@@ -74,8 +32,6 @@ interface NoteFilters {
 }
 
 interface CreateNoteData {
-  title: string;
-  content: any;
   category:
     | "note"
     | "password"
@@ -86,10 +42,7 @@ interface CreateNoteData {
     | "address"
     | "card"
     | "other";
-  project?: string;
-  tags?: string[];
   isFavorite?: boolean;
-  isEncrypted?: boolean;
   collectionId?: number | null;
   collectionIds?: number[];
   /** End-to-end item (stage 10.3): sealed in the browser. */
@@ -163,6 +116,10 @@ function companyPermission(
   }
   return permission;
 }
+
+/** A readable item sent to the server: refused since stage 10.6 (the app seals items first). */
+const e2eRequired = () =>
+  Object.assign(new Error("Unlock your vault and try again."), { status: 409, code: "e2e_required" });
 
 class NoteService {
   /**
@@ -441,7 +398,9 @@ class NoteService {
     json.collections = linked;
     json.collection = linked[0] || null;
     json.collectionId = linked[0]?.id ?? null;
-    json.content = withoutPrivateKeys(json.content);
+    // The server holds no readable content (stage 10.6): a sealed item's data is in encData, and
+    // `content` may still hold the old server-encrypted placeholder until migration 057 runs.
+    json.content = {};
     if (!isOwner) {
       json.sharedByName = owner?.fullName || owner?.username || "Someone";
     }
@@ -536,10 +495,6 @@ class NoteService {
       whereClause.category = storedCategory(filters.category);
     }
 
-    if (filters?.project && filters.project !== "all") {
-      whereClause.project = filters.project;
-    }
-
     const andClauses = [...(whereClause[Op.and] || [])];
 
     if (!filters?.companyId && !filters?.collectionId) {
@@ -566,16 +521,7 @@ class NoteService {
       });
     }
 
-    if (filters?.tag && filters.tag !== "all") {
-      andClauses.push(
-        sequelize.literal(
-          `"tags"::jsonb @> ${sequelize.escape(JSON.stringify([filters.tag]))}::jsonb`
-        )
-      );
-    }
-
-    // Search runs after decryption (see matchesSearch): content is encrypted
-    // in the database, so SQL cannot look inside it.
+    // Search, tags and password health live in the browser: the server can't read items.
 
     if (andClauses.length) {
       whereClause[Op.and] = andClauses;
@@ -592,11 +538,6 @@ class NoteService {
     const collectionsByNoteId = await CollectionService.collectionsByNoteId(
       notes.map((note) => note.id)
     );
-    // The password health report is part of paid plans.
-    const passwordHealthById =
-      filters?.trash || !(await EntitlementService.hasPasswordHealth(userId))
-        ? new Map<number, PasswordHealth>()
-        : await this.passwordHealthByNoteId(userId);
 
     // Shown to whoever manages access: the owner, or company owners/admins.
     const managedCompanies = await this.managedCompanyIds(userId);
@@ -616,23 +557,20 @@ class NoteService {
     const directIds = await this.directlySharedIds(userId, notes.map((note) => note.id));
     const keyPaths = await E2EItemService.keyPathsFor(userId, notes);
     const permissions = await this.withWorkPermissions(userId, notes, collectionsByNoteId, permissionByNoteId);
-    const search = String(filters?.search || "").trim().toLowerCase();
     return notes
       .map((note) => {
         const annotated = this.withKeyPaths(
           this.annotateNote(note, userId, permissions, favoriteNoteIds, collectionsByNoteId.get(note.id)),
           keyPaths
         );
-        const passwordHealth = passwordHealthById.get(note.id);
         const accessCount = accessCounts.get(note.id);
         const withAccess =
           accessCount === undefined ? annotated : { ...annotated, accessCount };
         const withDirect = annotated.isOwner
           ? withAccess
           : { ...withAccess, sharedDirectly: directIds.has(note.id) };
-        return passwordHealth ? { ...withDirect, passwordHealth } : withDirect;
-      })
-      .filter((note) => !search || this.matchesSearch(note, search));
+        return withDirect;
+      });
   }
 
   /**
@@ -650,35 +588,6 @@ class NoteService {
       itemKey: note.isOwner ? note.itemKey : null,
       e2eKeys: keyPaths.get(note.id) || { collections: [] },
     };
-  }
-
-  /**
-   * Title, project, collections, tags and content. Values of password-type
-   * fields are left out so search cannot be used to guess a secret.
-   */
-  private matchesSearch(note: any, search: string) {
-    const content = note.content;
-    const parts: unknown[] = [
-      note.title,
-      note.project,
-      ...(note.collections || []).map((item: any) => item?.name),
-      ...(Array.isArray(note.tags) ? note.tags : []),
-    ];
-    if (typeof content === "string") {
-      parts.push(content);
-    } else if (content && !isDecryptionFailure(content)) {
-      parts.push(content.mainContent);
-      for (const field of Array.isArray(content.customFields)
-        ? content.customFields
-        : []) {
-        parts.push(field?.label);
-        if (!isSecretFieldLabel(field?.label)) parts.push(field?.value);
-      }
-    }
-    return parts.some(
-      (part) =>
-        typeof part === "string" && part.toLowerCase().includes(search)
-    );
   }
 
   /**
@@ -741,10 +650,10 @@ class NoteService {
     let skipped = 0;
 
     for (const note of notes) {
-      const content = note.content as { decryptionFailed?: boolean };
       const linked = collectionsByNoteId.get(note.id) || [];
       if (isWorkItem(note, linked)) continue;
-      if (content?.decryptionFailed) {
+      // Only sealed items exist since stage 10.6; anything else is left out.
+      if (!note.e2e) {
         skipped += 1;
         continue;
       }
@@ -765,20 +674,7 @@ class NoteService {
           collectionIds: linked.map((collection) => collection.id),
           isFavorite: favoriteNoteIds.has(note.id),
         });
-        continue;
       }
-      exported.push({
-        title: note.title,
-        content: note.content,
-        category: note.category,
-        project: names[0] || note.project || null,
-        collection: names[0] || null,
-        collections: names,
-        // Encrypted names come empty: the app fills them in by id.
-        collectionIds: linked.map((collection) => collection.id),
-        tags: note.tags || [],
-        isFavorite: favoriteNoteIds.has(note.id),
-      });
     }
 
     return {
@@ -833,118 +729,21 @@ class NoteService {
           // Encrypted names come empty: the app fills them in by id.
           collectionIds: linkedHere.map((collection) => collection.id),
         });
-        continue;
-      }
-      if ((note.content as { decryptionFailed?: boolean })?.decryptionFailed) {
+      } else {
+        // Only sealed items exist since stage 10.6; anything else is left out.
         skipped += 1;
-        continue;
       }
-      exported.push({
-        title: note.title,
-        content: note.content,
-        category: note.category,
-        project: names[0] || note.project || null,
-        collection: names[0] || null,
-        collections: names,
-        // Encrypted names come empty: the app fills them in by id.
-        collectionIds: linkedHere.map((collection) => collection.id),
-        tags: note.tags || [],
-      });
     }
 
     return { version: 1, exportedAt: new Date().toISOString(), skipped, notes: exported };
   }
 
   /**
-   * Create notes from a backup file. Shares are not copied.
-   */
-  async importNotes(userId: number, notes: any[]) {
-    if (!Array.isArray(notes) || notes.length === 0) {
-      throw Object.assign(new Error("Backup has no notes"), { status: 400 });
-    }
-    if (notes.length > 1000) {
-      throw Object.assign(new Error("Backup is limited to 1000 notes"), {
-        status: 400,
-      });
-    }
-
-    const categories = [
-      "note",
-      "password",
-      "login",
-      "command",
-      "ssh",
-      "db",
-      "address",
-      "card",
-      "other",
-    ] as const;
-    let imported = 0;
-    const failed: { title: string; message: string }[] = [];
-
-    for (const item of notes) {
-      const title = String(item?.title || "").trim();
-      try {
-        if (!title) {
-          throw new Error("Title is required");
-        }
-        if (!(categories as readonly string[]).includes(item?.category)) {
-          throw new Error("Invalid category");
-        }
-        if (
-          !item.content ||
-          typeof item.content !== "object" ||
-          item.content.decryptionFailed
-        ) {
-          throw new Error("Invalid content");
-        }
-
-        const tags = Array.isArray(item.tags)
-          ? item.tags
-              .map((tag: unknown) => String(tag).trim())
-              .filter(Boolean)
-              .slice(0, 20)
-          : [];
-
-        const collectionNames = (
-          Array.isArray(item.collections) ? item.collections : [item.collection || item.project]
-        )
-          .map((name: unknown) => String(name || "").trim())
-          .filter(Boolean);
-        const collectionIds: number[] = [];
-        for (const collectionName of collectionNames) {
-          const [collection] = await Collection.findOrCreate({
-            where: { userId, name: collectionName.slice(0, 100) },
-            defaults: { userId, name: collectionName.slice(0, 100) },
-          });
-          collectionIds.push(collection.id);
-        }
-
-        await this.createNote(userId, {
-          title: title.slice(0, 255),
-          content: item.content,
-          category: storedCategory(item.category),
-          collectionIds,
-          tags,
-          isFavorite: Boolean(item.isFavorite),
-        });
-        imported += 1;
-      } catch (error) {
-        console.error("Error importing note:", error);
-        failed.push({
-          title: title || "Untitled",
-          message: "Could not import this note",
-        });
-      }
-    }
-
-    return { imported, failed };
-  }
-
-  /**
    * Create a new note
    */
   async createNote(userId: number, data: CreateNoteData) {
+    // Stage 10.6: items arrive sealed by the browser; the server can't take a readable one.
+    if (!data.e2e) throw e2eRequired();
     const requested = this.requestedCollectionIds(data);
     if (requested?.length) {
       for (const collectionId of requested) {
@@ -952,52 +751,7 @@ class NoteService {
       }
     }
     const companyId = owningCompany(await CollectionService.collectionRefs(requested || []));
-    if (data.e2e) return this.createSealed(userId, data, requested || [], companyId);
-
-    const content = cleanOnCreate(data.content);
-    await this.assertPasswordRule(requested || [], content);
-    const note = await Note.create({
-      title: data.title,
-      content,
-      category: storedCategory(data.category) || "note",
-      project: data.project,
-      collectionId: null,
-      tags: data.tags || [],
-      isEncrypted: data.isEncrypted || storedPasskeys(content).length > 0,
-      userId,
-      companyId,
-    });
-    await this.keepVersion(note.id, userId, {
-      title: note.title,
-      category: note.category,
-      tags: note.tags || [],
-      content,
-    });
-
-    if (requested?.length) {
-      await CollectionService.setNoteCollections(note.id, requested);
-    }
-
-    if (data.isFavorite) {
-      await this.setUserFavorite(userId, note.id, true);
-    }
-
-    const saved = await Note.findByPk(note.id, {
-      include: this.collectionInclude(),
-    });
-    const favoriteNoteIds = await this.getFavoriteNoteIds(userId);
-    const collections = await CollectionService.collectionsByNoteId([note.id]);
-    return this.withKeyPaths(
-      this.annotateNote(
-        saved || note,
-        userId,
-        // A new work item shows the creator's company access, not ownership.
-        await this.withWorkPermissions(userId, [saved || note], collections, new Map()),
-        favoriteNoteIds,
-        collections.get(note.id)
-      ),
-      await E2EItemService.keyPathsFor(userId, [saved || note])
-    );
+    return this.createSealed(userId, data, requested || [], companyId);
   }
 
   /** A new end-to-end item: the server stores what the browser sealed. */
@@ -1117,123 +871,8 @@ class NoteService {
     }
 
     const note = access.note;
-    if (note.e2e) return this.updateSealed(note, userId, data, access.permission);
-    if (data.encData !== undefined) {
-      throw Object.assign(new Error("This item isn't end-to-end encrypted yet."), { status: 409 });
-    }
-    // Editing would replace data we could not read with whatever the form held.
-    if (data.content !== undefined && isDecryptionFailure(note.content)) {
-      throw Object.assign(
-        new Error("This item could not be decrypted, so it cannot be edited."),
-        { status: 409 }
-      );
-    }
-    const content =
-      data.content !== undefined ? mergeOnUpdate(note.content, data.content) : note.content;
-    if (data.content !== undefined || this.requestedCollectionIds(data)) {
-      const linkedIds = ((await CollectionService.collectionsByNoteId([note.id])).get(note.id) || []).map(
-        (collection) => collection.id
-      );
-      await this.assertPasswordRule([...linkedIds, ...(this.requestedCollectionIds(data) || [])], content);
-    }
-    const before: ItemState & { savedAt?: Date } = {
-      title: note.title,
-      category: storedCategory(note.category),
-      tags: note.tags || [],
-      content: note.content,
-      savedAt: note.updatedAt,
-    };
-    const payload: any = {
-      title: data.title !== undefined ? data.title : note.title,
-      content,
-      category:
-        data.category !== undefined ? storedCategory(data.category) : storedCategory(note.category),
-      tags: data.tags !== undefined ? data.tags : note.tags,
-      // An item holding a private key is never stored in plain text.
-      isEncrypted:
-        storedPasskeys(content).length > 0 ||
-        (data.isEncrypted !== undefined ? data.isEncrypted : note.isEncrypted),
-    };
-
-    const change = await this.collectionChange(note, access.permission, userId, data);
-    // First: a refused move must not save the edit anyway.
-    if (change) await this.commitCollections(note, change, userId);
-
-    await note.update(payload);
-    await this.keepVersion(
-      note.id,
-      userId,
-      { title: payload.title, category: payload.category, tags: payload.tags || [], content },
-      before
-    );
-
-    // Favorites are per person: anyone saving a work item may set theirs here.
-    if ((access.permission === "owner" || isWorkItem(note)) && data.isFavorite !== undefined) {
-      await this.setUserFavorite(userId, note.id, Boolean(data.isFavorite));
-    }
-
-    const saved = await Note.findByPk(note.id, {
-      include: this.collectionInclude(),
-    });
-    const favoriteNoteIds = await this.getFavoriteNoteIds(userId);
-    const collections = await CollectionService.collectionsByNoteId([note.id]);
-    const permissionByNoteId = new Map<number, SharePermission>();
-    if (access.permission !== "owner") {
-      permissionByNoteId.set(noteId, access.permission);
-    }
-    return this.withKeyPaths(
-      this.annotateNote(
-        saved || note,
-        userId,
-        // A work item (or one just moved into a company) shows the caller's company access.
-        await this.withWorkPermissions(userId, [saved || note], collections, permissionByNoteId),
-        favoriteNoteIds,
-        collections.get(note.id)
-      ),
-      await E2EItemService.keyPathsFor(userId, [saved || note])
-    );
-  }
-
-  /** A company's minimum password length, for logins in its collections. */
-  private async assertPasswordRule(collectionIds: number[], content: any) {
-    if (!collectionIds.length) return;
-    const collections = await Collection.findAll({
-      where: { id: { [Op.in]: collectionIds } },
-      attributes: ["id", "companyId"],
-    });
-    const companyIds = [
-      ...new Set(collections.map((item) => item.companyId).filter((id): id is number => !!id)),
-    ];
-    const rule = await CompanyPolicyService.minPasswordLength(companyIds);
-    if (!rule) return;
-    const fields = content && typeof content === "object" && Array.isArray(content.customFields)
-      ? content.customFields
-      : [];
-    for (const field of fields) {
-      const value = String(field?.value ?? "");
-      if (/pass/i.test(String(field?.label ?? "")) && value && value.length < rule.length) {
-        throw Object.assign(
-          new Error(
-            `${rule.company} requires passwords of at least ${rule.length} characters. "${field.label}" has ${value.length}.`
-          ),
-          { status: 400 }
-        );
-      }
-    }
-  }
-
-  // History must never stop a save; a failure is logged instead.
-  private async keepVersion(
-    noteId: number,
-    userId: number,
-    after: ItemState,
-    before?: ItemState & { savedAt?: Date }
-  ) {
-    try {
-      await VersionService.afterSave(noteId, after, userId, before);
-    } catch (error: any) {
-      console.error("Could not keep a version of item", noteId, error?.message || error);
-    }
+    if (!note.e2e) throw e2eRequired();
+    return this.updateSealed(note, userId, data, access.permission);
   }
 
   /** Who may see and restore versions: the people who may edit the item. */
@@ -1255,83 +894,9 @@ class NoteService {
     return VersionService.get(noteId, versionId);
   }
 
-  /**
-   * Put an older version back. It is saved like an edit, so the state before
-   * the restore becomes a version too and the restore can be undone.
-   */
-  async restoreVersion(noteId: number, versionId: number, userId: number) {
-    const access = await this.versionAccess(noteId, userId);
-    if (!access) return null;
-    // The browser restores these itself: it opens the version and saves it.
-    if (access.note.e2e) {
-      throw Object.assign(new Error("Reload the page to restore this version."), { status: 409 });
-    }
-    const version = await VersionService.get(noteId, versionId);
-    if (!version) return null;
-    if (isDecryptionFailure(version.content)) {
-      throw Object.assign(new Error("This version could not be decrypted."), { status: 409 });
-    }
-    const content =
-      version.content && typeof version.content === "object"
-        ? (({ passkeys: _passkeys, ...rest }) => rest)(version.content)
-        : version.content;
-    const saved = await this.updateNote(noteId, userId, {
-      title: version.title,
-      category: version.category as any,
-      tags: version.tags,
-      content,
-    });
-    return saved ? { note: saved, version } : null;
-  }
-
-  async autofill(userId: number, host: string, query = "") {
-    const pageHost = normalizeHost(host);
-    const q = query.trim().toLowerCase();
-    if (!pageHost && q.length < 2) {
-      throw Object.assign(new Error("Invalid site"), { status: 400 });
-    }
-
-    const noteIds = await this.autofillNoteIds(userId);
-    const notes = noteIds.length
-      ? await Note.findAll({
-          where: {
-            id: { [Op.in]: noteIds },
-            category: { [Op.in]: ["password", "login"] },
-          },
-          attributes: ["id", "title", "content", "isEncrypted"],
-        })
-      : [];
-
-    const matches: {
-      id: number;
-      title: string;
-      username: string;
-      password: string;
-      // Authenticator key or otpauth:// link; the extension makes the codes.
-      totp: string;
-    }[] = [];
-
-    notes.forEach((note) => {
-      const content = note.content as any;
-      if (!content || content.decryptionFailed) return;
-      const fields = Array.isArray(content.customFields) ? content.customFields : [];
-      const matched = q
-        ? this.noteMatchesQuery(note.title, fields, q)
-        : matchesHost(this.matchTexts(note.title, fields), pageHost);
-      if (!matched) return;
-      const password = this.pickPassword(fields);
-      const totp = this.pickTotp(fields);
-      if (!password && !totp) return;
-      matches.push({
-        id: note.id,
-        title: note.title,
-        username: this.pickUsername(fields),
-        password,
-        totp,
-      });
-    });
-
-    return matches.slice(0, 20);
+  /** Old extensions still ask (stage 10.6): readable items are gone, so nothing to match here. */
+  async autofill(_userId: number, _host: string, _query = ""): Promise<any[]> {
+    return [];
   }
 
   /**
@@ -1371,79 +936,9 @@ class NoteService {
     });
   }
 
-  /**
-   * Passkeys that work on `host`, with their private keys: only for the browser
-   * extension, which signs the site's challenge with them.
-   */
-  async passkeysForSite(userId: number, host: string) {
-    const pageHost = String(host || "").trim().toLowerCase();
-    if (!/^[a-z0-9.-]+$/.test(pageHost)) {
-      throw Object.assign(new Error("Invalid site"), { status: 400 });
-    }
-
-    const noteIds = await this.autofillNoteIds(userId);
-    const notes = noteIds.length
-      ? await Note.findAll({
-          where: { id: { [Op.in]: noteIds }, category: { [Op.in]: ["password", "login"] } },
-          attributes: ["id", "title", "content", "isEncrypted"],
-        })
-      : [];
-
-    return notes.flatMap((note) => {
-      const content = note.content as any;
-      if (!content || content.decryptionFailed) return [];
-      return storedPasskeys(content)
-        .filter((passkey) => rpIdMatchesHost(passkey.rpId, pageHost))
-        .map((passkey) => ({ noteId: note.id, title: note.title, ...passkey }));
-    });
-  }
-
-  /**
-   * Keep a passkey the extension just made: on the login the person picked (they
-   * need edit access), or on a new login for the site.
-   */
-  async savePasskey(userId: number, input: { noteId?: number | null; passkey: unknown }) {
-    const passkey = cleanPasskey(input.passkey);
-    if (!passkey) {
-      throw Object.assign(new Error("This passkey could not be saved."), { status: 400 });
-    }
-
-    if (input.noteId) {
-      const access = await this.getNoteAccess(Number(input.noteId), userId);
-      if (!access || (access.permission !== "owner" && access.permission !== "edit")) {
-        throw Object.assign(new Error("You can't change that item."), { status: 403 });
-      }
-      const note = access.note;
-      // The server can't read an end-to-end item; writing the passkey here would store it readable.
-      if (note.e2e) {
-        throw Object.assign(new Error("This item is end-to-end encrypted. Update the extension to save passkeys to it."), {
-          status: 409,
-        });
-      }
-      if (isDecryptionFailure(note.content)) {
-        throw Object.assign(
-          new Error("This item could not be decrypted, so it cannot be changed."),
-          { status: 409 }
-        );
-      }
-      await note.update({ content: addPasskey(note.content, passkey), isEncrypted: true });
-      return { noteId: note.id, created: false };
-    }
-
-    const note = await this.createNote(userId, {
-      title: passkey.rpId,
-      category: "password",
-      content: {
-        mainContent: "",
-        customFields: [
-          ...(passkey.userName ? [{ label: "Username", value: passkey.userName }] : []),
-          { label: "URL", value: `https://${passkey.rpId}` },
-        ],
-        passkeys: [passkey],
-      },
-      tags: [],
-    });
-    return { noteId: note.id, created: true };
+  /** Old extensions still ask (stage 10.6): sealed items carry their passkeys, matched in the extension. */
+  async passkeysForSite(_userId: number, _host: string): Promise<any[]> {
+    return [];
   }
 
   private async autofillNoteIds(userId: number) {
@@ -1483,135 +978,6 @@ class NoteService {
       : [];
 
     return [...new Set([...personalIds, ...companyIds])];
-  }
-
-  private noteMatchesQuery(title: string, fields: any[], query: string) {
-    return this.matchTexts(title, fields).some((text) =>
-      text.toLowerCase().includes(query)
-    );
-  }
-
-  private matchTexts(title: string, fields: any[]) {
-    return [
-      title,
-      ...fields
-        .filter((field) => field?.value && !isSecretFieldLabel(field.label))
-        .map((field) => String(field.value)),
-    ];
-  }
-
-  private pickPassword(fields: any[]) {
-    const labeled = fields.filter(
-      (field) => field?.value && typeof field.label === "string" && /pass/i.test(field.label)
-    );
-    const preferred = labeled.find(
-      (field) => /password/i.test(field.label) && !/key/i.test(field.label)
-    );
-    return String((preferred || labeled[0])?.value || "");
-  }
-
-  private pickTotp(fields: any[]) {
-    const field = fields.find(
-      (item) => item?.value && isTotpFieldLabel(item.label) && String(item.value).trim()
-    );
-    return field ? String(field.value).trim() : "";
-  }
-
-  private pickUsername(fields: any[]) {
-    const field = fields.find(
-      (item) =>
-        item?.value &&
-        typeof item.label === "string" &&
-        /user|email|login/i.test(item.label) &&
-        !/pass/i.test(item.label)
-    );
-    return field ? String(field.value) : "";
-  }
-
-  private passwordValues(content: any): string[] {
-    if (!content || content.decryptionFailed) return [];
-    const fields = Array.isArray(content.customFields) ? content.customFields : [];
-    return fields
-      .filter(
-        (field: any) =>
-          typeof field?.label === "string" &&
-          /pass/i.test(field.label) &&
-          field.value
-      )
-      .map((field: any) => String(field.value));
-  }
-
-  private isWeakPassword(value: string) {
-    if (value.length < 12) return true;
-    let classes = 0;
-    if (/[a-z]/.test(value)) classes += 1;
-    if (/[A-Z]/.test(value)) classes += 1;
-    if (/[0-9]/.test(value)) classes += 1;
-    if (/[^A-Za-z0-9]/.test(value)) classes += 1;
-    return classes < 3;
-  }
-
-  private async passwordHealthByNoteId(userId: number) {
-    const notes = await Note.findAll({
-      where: { userId, category: { [Op.in]: ["password", "login"] } },
-      attributes: ["id", "content", "updatedAt", "category", "isEncrypted"],
-    });
-    const collectionsByNote = await CollectionService.collectionsByNoteId(
-      notes.map((note) => note.id)
-    );
-    const personalNotes = notes.filter((note) => {
-      const linked = collectionsByNote.get(note.id) || [];
-      return !linked.some((collection) => collection.companyId);
-    });
-
-    const noteIdsBySecret = new Map<string, Set<number>>();
-    const valuesByNote = new Map<number, string[]>();
-    personalNotes.forEach((note) => {
-      const values = this.passwordValues(note.content);
-      valuesByNote.set(note.id, values);
-      new Set(values).forEach((value) => {
-        const ids = noteIdsBySecret.get(value) || new Set<number>();
-        ids.add(note.id);
-        noteIdsBySecret.set(value, ids);
-      });
-    });
-
-    const staleBefore = Date.now() - 180 * 24 * 60 * 60 * 1000;
-    const health = new Map<number, PasswordHealth>();
-
-    // A leak result only counts while it is newer than the item's last change.
-    // If the lookup fails (say, migration 026 hasn't run yet), the vault still
-    // loads; it just shows no leak flags.
-    const breaches = personalNotes.length
-      ? await BreachResult.findAll({
-          where: { userId, noteId: { [Op.in]: personalNotes.map((note) => note.id) } },
-          attributes: ["noteId", "count", "checkedAt"],
-        }).catch((error) => {
-          console.error("Could not read leak check results:", error?.message || error);
-          return [] as BreachResult[];
-        })
-      : [];
-    const breachByNote = new Map(breaches.map((row) => [row.noteId, row]));
-
-    personalNotes.forEach((note) => {
-      const values = valuesByNote.get(note.id) || [];
-      if (!values.length) return;
-      const weak = values.some((value) => this.isWeakPassword(value));
-      const reused = values.some(
-        (value) => (noteIdsBySecret.get(value)?.size || 0) > 1
-      );
-      const stale = new Date(note.updatedAt).getTime() < staleBefore;
-      const result = breachByNote.get(note.id);
-      const breached =
-        result && result.checkedAt.getTime() >= new Date(note.updatedAt).getTime()
-          ? result.count
-          : 0;
-      if (weak || reused || stale || breached) {
-        health.set(note.id, { weak, reused, stale, breached });
-      }
-    });
-
-    return health;
   }
 
   /** When each personal login was last checked for leaks. */
@@ -1947,29 +1313,6 @@ class NoteService {
   }
 
   /**
-   * Get all distinct projects for a user (owned + shared notes)
-   */
-  async getProjects(userId: number) {
-    const { sharedNoteIds } = await this.getSharedNoteIds(userId);
-
-    const projects = await Note.findAll({
-      where: {
-        [Op.or]: [
-          { userId },
-          ...(sharedNoteIds.length ? [{ id: { [Op.in]: sharedNoteIds } }] : []),
-        ],
-        project: { [Op.not]: null as any },
-      },
-      attributes: [
-        [sequelize.fn("DISTINCT", sequelize.col("project")), "project"],
-      ],
-      raw: true,
-    });
-
-    return projects.map((p: any) => p.project).filter(Boolean);
-  }
-
-  /**
    * Resolve access for a note
    */
   async getNoteAccess(noteId: number, userId: number) {
@@ -2144,13 +1487,13 @@ class NoteService {
     const ownerName = owner?.fullName || owner?.username || "Someone";
     await NotificationService.create(
       recipient.id,
-      // End-to-end items have no title here: the notice doesn't name them.
-      note.title ? `${ownerName} shared "${note.title}" with you` : `${ownerName} shared an item with you`,
+      // The server can't read item titles: the notice doesn't name them.
+      `${ownerName} shared an item with you`,
       note.id
     );
     await EmailService.sendNoteShare({
       to: recipient.email,
-      noteTitle: note.title,
+      noteTitle: "",
       companyId,
     });
 
@@ -2373,7 +1716,6 @@ class NoteService {
     return {
       removed: removed > 0,
       collections,
-      title: note.title,
       ownerId: note.userId,
     };
   }

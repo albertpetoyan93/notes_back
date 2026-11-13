@@ -1,7 +1,9 @@
 import crypto from "crypto";
 
 /**
- * AES-256-GCM with a random IV per value.
+ * AES-256-GCM with a random IV per value, for the few secrets the server must
+ * read itself: 2FA secrets and secret-link labels. Vault items never come here:
+ * they're sealed in the browser (stage 10.6).
  *
  * Stored format: "v2:<keyId>:<iv>:<authTag>:<data>" (hex). Values written
  * before key ids existed are "<iv>:<authTag>:<data>"; they are read with
@@ -149,58 +151,4 @@ export function decrypt(encryptedText: string): string {
     }
   }
   throw new Error("Failed to decrypt data: no configured key matches.");
-}
-
-/**
- * Encrypt note content (handles both string and object)
- */
-export function encryptContent(content: any): any {
-  if (typeof content === "string") {
-    return encrypt(content);
-  }
-
-  if (typeof content === "object" && content !== null) {
-    // Encrypt the JSON stringified version
-    return encrypt(JSON.stringify(content));
-  }
-
-  return content;
-}
-
-/** What a note's content becomes when it cannot be decrypted. */
-export function isDecryptionFailure(content: unknown) {
-  return Boolean(
-    content &&
-      typeof content === "object" &&
-      (content as { decryptionFailed?: boolean }).decryptionFailed
-  );
-}
-
-/**
- * Decrypt note content (handles both string and object)
- */
-export function decryptContent(encryptedContent: any): any {
-  // Content saved before it was encrypted is returned as it is.
-  if (!isEncryptedValue(encryptedContent)) {
-    return encryptedContent;
-  }
-
-  try {
-    const decrypted = decrypt(encryptedContent);
-
-    // Try to parse as JSON
-    try {
-      return JSON.parse(decrypted);
-    } catch {
-      // If not JSON, return as string
-      return decrypted;
-    }
-  } catch (error) {
-    console.error("Error decrypting content:", error);
-    return {
-      decryptionFailed: true,
-      mainContent: "",
-      customFields: [],
-    };
-  }
 }

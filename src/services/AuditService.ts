@@ -216,16 +216,9 @@ class AuditService {
         companyId = collection?.companyId ?? null;
       }
 
-      // Keep the title so the history stays readable after the item is gone.
+      // No item titles: the server can't read them; the app shows the ones it opens (stage 10.6).
       const details = { ...(input.details || {}) };
-      if (input.noteId && details.title === undefined) {
-        const note = await Note.findByPk(input.noteId, {
-          paranoid: false,
-          attributes: ["title"],
-        });
-        // End-to-end items have no readable title; the app shows the one it opens.
-        if (note?.title) details.title = note.title;
-      }
+      delete details.title;
       if (input.collectionId && details.collectionName === undefined) {
         const collection = await Collection.findByPk(input.collectionId, {
           attributes: ["name", "encName"],

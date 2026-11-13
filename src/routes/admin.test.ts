@@ -95,7 +95,7 @@ const TABLE = [
   "delete /support-requests/:id support.actions",
   "get /companies companies.view",
   "get /companies/:id companies.view",
-  "post /companies/:id/transfer-ownership support.actions",
+  "post /companies/:id/transfer-ownership companies.transfer",
   "post /subscriptions/:id/cancel billing.cancel",
   "get /subscriptions/:id/payments billing.manage",
   "post /subscriptions/:id/refund billing.manage",
@@ -116,6 +116,7 @@ const EXPECTED: Record<Permission, StaffRole[]> = {
   "overview.revenue": ["admin"],
   "users.view": ["admin", "support"],
   "companies.view": ["admin", "support"],
+  "companies.transfer": ["admin"],
   "support.actions": ["admin", "support"],
   "billing.cancel": ["admin", "support"],
   "billing.manage": ["admin"],
@@ -383,11 +384,17 @@ describe("bodies", () => {
     expect(m.requests.cancel).toHaveBeenCalledWith(expect.anything(), 4, "user found the phone", expect.anything());
   });
 
+  it("transfer-ownership is admin-only: support staff are refused", async () => {
+    const res = await as("support", "post", "/companies/3/transfer-ownership", { reason: "r", newOwnerUserId: 9 });
+    expect(res.status).toBe(403);
+    expect(m.support.transferCompanyOwnership).not.toHaveBeenCalled();
+  });
+
   it("transfer-ownership needs a valid new owner id", async () => {
-    const res = await as("support", "post", "/companies/3/transfer-ownership", { reason: "r", newOwnerUserId: "x" });
+    const res = await as("admin", "post", "/companies/3/transfer-ownership", { reason: "r", newOwnerUserId: "x" });
     expect(res.status).toBe(400);
     expect(m.support.transferCompanyOwnership).not.toHaveBeenCalled();
-    await as("support", "post", "/companies/3/transfer-ownership", { reason: "r", newOwnerUserId: 9 });
+    await as("admin", "post", "/companies/3/transfer-ownership", { reason: "r", newOwnerUserId: 9 });
     expect(m.support.transferCompanyOwnership).toHaveBeenCalledWith(expect.anything(), 3, 9, "r", expect.anything());
   });
 

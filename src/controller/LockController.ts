@@ -46,13 +46,11 @@ export default class LockController {
         res.status(HttpStatusCodes.UNAUTHORIZED).send({ message: "Sign in again" });
         return;
       }
-      // Master-password accounts prove it with the derived sign-in key.
-      const secret = String((user.e2eEnabled ? req.body?.authKey : req.body?.password) || "");
-      if (!secret || !(await user.comparePassword(secret))) {
+      // Proved with the key derived from the master password; a typed password never unlocks (stage 10.6).
+      const secret = String(req.body?.authKey || "");
+      if (!user.e2eEnabled || !secret || !(await user.comparePassword(secret))) {
         await AuditService.record({ actorId: user.id, action: "unlock_failed", req });
-        res.status(HttpStatusCodes.UNAUTHORIZED).send({
-          message: user.e2eEnabled ? "That master password isn't right." : "That password isn't right.",
-        });
+        res.status(HttpStatusCodes.UNAUTHORIZED).send({ message: "That master password isn't right." });
         return;
       }
       await SessionService.unlock(sessionId, user.id);

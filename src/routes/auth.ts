@@ -48,7 +48,6 @@ router.post("/extension/refresh", AuthController.extensionRefresh);
 router.post("/extension/logout", AuthController.extensionLogout);
 router.post("/register", authLimiter, AuthController.register);
 router.post("/forgot-password", authLimiter, AuthController.forgotPassword);
-router.post("/reset-password", authLimiter, AuthController.resetPassword);
 router.post("/refresh", AuthController.refresh);
 router.post("/logout", AuthController.logout);
 router.post("/2fa/verify", twoFactorLimiter, AuthController.verifyTwoFactor);
@@ -100,14 +99,12 @@ router.post("/prelogin", lookupLimiter, E2EController.prelogin);
 router.post("/e2e/recover", twoFactorLimiter, E2EController.recoveryStart);
 router.post("/e2e/recover/complete", twoFactorLimiter, E2EController.recoveryComplete);
 router.get("/e2e/keys", isAuth, E2EController.keys as any);
-router.post("/e2e/check-password", authLimiter, isAuth, E2EController.checkPassword as any);
 // Email confirmation: the link (public, the token decides) and asking for a new one (signed in).
 router.post("/email/confirm", authLimiter, AuthController.confirmEmail);
 router.post("/email/resend", authLimiter, isAuth, AuthController.resendEmailConfirmation as any);
 // Account reset from the emailed link (no session: the person can't sign in). Rate limited.
 router.post("/e2e/reset-account/check", authLimiter, E2EController.resetAccountCheck);
 router.post("/e2e/reset-account", twoFactorLimiter, E2EController.resetAccount);
-router.post("/e2e/enable", authLimiter, isAuth, E2EController.enable as any);
 router.post("/e2e/master-password", authLimiter, isAuth, E2EController.changeMasterPassword as any);
 router.post("/e2e/recovery-key", authLimiter, isAuth, E2EController.replaceRecoveryKey as any);
 

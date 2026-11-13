@@ -22,13 +22,11 @@ describe("which address an email comes from", () => {
   it("account-safety emails come from the security address", async () => {
     const security: (() => Promise<unknown>)[] = [
       () => EmailService.sendNewSignIn({ to, device: "Chrome", how: "password", ip: null, time: new Date() }),
-      () => EmailService.sendPasswordReset({ to, token: "t" }),
       () => EmailService.sendAccountResetLink({ to, token: "t" }),
       () => EmailService.sendMasterPasswordHelp({ to }),
       () => EmailService.sendTwoFactorChanged({ to, enabled: true }),
       () => EmailService.sendRemoveTwoFactorConfirm({ to, link: "https://x", expiresAt: new Date() }),
       () => EmailService.sendSecurityNotice({ to, what: "x" }),
-      () => EmailService.sendE2EReminder({ to, deadline: null }),
     ];
     for (const send of security) {
       await send();

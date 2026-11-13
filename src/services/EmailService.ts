@@ -122,29 +122,6 @@ class EmailService {
     return this.deliver(input.to, subject, text, html);
   }
 
-  async sendPasswordReset(input: { to: string; token: string }) {
-    const origin = EnvVars.FrontendOrigin || "http://localhost:5173";
-    const link = `${origin}/auth/reset?token=${encodeURIComponent(input.token)}`;
-    const subject = "Reset your 2keevo password";
-    const text = [
-      "We received a request to reset your 2keevo password.",
-      "",
-      "Click below to choose a new password. This link expires in 1 hour.",
-      "",
-      link,
-      "",
-      "If you did not ask for this, you can ignore this email.",
-    ].join("\n");
-    const safeLink = escapeHtml(link);
-    const html = `<div style="font-family:Segoe UI,sans-serif;color:#1f2937;line-height:1.5;">
-<p style="margin:0 0 16px;">We received a request to reset your 2keevo password.</p>
-<p style="margin:0 0 16px;">Click below to choose a new password. This link expires in 1 hour.</p>
-<p style="margin:0 0 20px;"><a href="${safeLink}" style="display:inline-block;background:#6d5efc;color:#ffffff;text-decoration:none;padding:10px 16px;border-radius:8px;">Reset password</a></p>
-<p style="margin:0;color:#6b7280;font-size:13px;">If you did not ask for this, you can ignore this email.</p>
-</div>`;
-    return this.deliver(input.to, subject, text, html, this.securityFrom());
-  }
-
   /** A new account confirms its address (single-use link, 24 h). */
   async sendEmailConfirmation(input: { to: string; token: string }) {
     const origin = EnvVars.FrontendOrigin || "http://localhost:5173";
@@ -307,23 +284,6 @@ class EmailService {
 <p style="margin:0 0 16px;">${escapeHtml(how)}</p>
 <p style="margin:0 0 20px;"><a href="${escapeHtml(input.link)}" style="display:inline-block;background:#6d5efc;color:#ffffff;text-decoration:none;padding:10px 16px;border-radius:8px;">Review the request</a></p>
 <p style="margin:0;color:#6b7280;font-size:13px;">${escapeHtml(ignore)}</p>
-</div>`;
-    return this.deliver(input.to, subject, text, html, this.securityFrom());
-  }
-
-  /** Accounts that haven't turned on end-to-end encryption yet (npm run e2e:remind). */
-  async sendE2EReminder(input: { to: string; deadline: string | null }) {
-    const origin = EnvVars.FrontendOrigin || "http://localhost:5173";
-    const link = `${origin}/settings/security`;
-    const by = input.deadline
-      ? ` by ${new Date(input.deadline).toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" })}`
-      : "";
-    const subject = "Turn on end-to-end encryption for your 2keevo vault";
-    const what = `2keevo now encrypts your vault in your browser, so nobody else (not even 2keevo) can read it. Please turn it on${by}: your password becomes your master password, and you get a recovery key. It takes a minute.`;
-    const text = [what, "", link].join("\n");
-    const html = `<div style="font-family:Segoe UI,sans-serif;color:#1f2937;line-height:1.5;">
-<p style="margin:0 0 16px;">${escapeHtml(what)}</p>
-<p style="margin:0;"><a href="${escapeHtml(link)}" style="display:inline-block;background:#6d5efc;color:#ffffff;text-decoration:none;padding:10px 16px;border-radius:8px;">Turn it on</a></p>
 </div>`;
     return this.deliver(input.to, subject, text, html, this.securityFrom());
   }

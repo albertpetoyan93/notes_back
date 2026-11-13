@@ -36,8 +36,6 @@ interface LoginData {
 
 /** Thrown when an old app sends a typed password for a master-password account. */
 export const E2E_REQUIRED = "E2E_REQUIRED";
-export const MASTER_RESET_REFUSED =
-  "This account uses a master password, which can't be reset by email. Use your recovery key instead.";
 
 class AuthService {
   /**
@@ -83,21 +81,12 @@ class AuthService {
       throw new Error("Invalid credentials");
     }
 
-    // Master-password accounts only accept the derived sign-in key. A typed
-    // password can never match it, so an old app gets a clear message instead.
-    if (user.e2eEnabled) {
-      if (!data.authKey) throw new Error(E2E_REQUIRED);
-      if (!/^[A-Za-z0-9_-]{43}$/.test(String(data.authKey))) throw new Error("Invalid credentials");
-      if (!(await user.comparePassword(String(data.authKey)))) throw new Error("Invalid credentials");
-      return user;
-    }
-
-    const isPasswordValid = await user.comparePassword(String(data.password ?? ""));
-
-    if (!isPasswordValid) {
-      throw new Error("Invalid credentials");
-    }
-
+    // Every account signs in with the key derived from the master password (stage 10.6).
+    // A typed password can never match it, so an old app gets a clear message instead.
+    if (!data.authKey) throw new Error(E2E_REQUIRED);
+    if (!user.e2eEnabled) throw new Error("Invalid credentials");
+    if (!/^[A-Za-z0-9_-]{43}$/.test(String(data.authKey))) throw new Error("Invalid credentials");
+    if (!(await user.comparePassword(String(data.authKey)))) throw new Error("Invalid credentials");
     return user;
   }
 
@@ -175,26 +164,10 @@ class AuthService {
     // A master password can't be reset by email: the server can't open the
     // vault. The email says to use the recovery key; without it, the link
     // resets the account (AccountResetService: personal items are lost).
-    if (user.e2eEnabled) {
-      await user.update({ passwordResetTokenHash, passwordResetExpires });
-      try {
-        if (EmailService.isConfigured()) await EmailService.sendAccountResetLink({ to: user.email, token });
-        else this.logLinkOutsideProduction(user, "Account reset", `/auth/reset-account?token=${token}`);
-      } catch (error) {
-        logger.err(error, true);
-      }
-      return RESET_MESSAGE;
-    }
-
     await user.update({ passwordResetTokenHash, passwordResetExpires });
-
-    if (!EmailService.isConfigured()) {
-      this.logLinkOutsideProduction(user, "Password reset", `/auth/reset?token=${token}`);
-      return RESET_MESSAGE;
-    }
-
     try {
-      await EmailService.sendPasswordReset({ to: user.email, token });
+      if (EmailService.isConfigured()) await EmailService.sendAccountResetLink({ to: user.email, token });
+      else this.logLinkOutsideProduction(user, "Account reset", `/auth/reset-account?token=${token}`);
     } catch (error) {
       logger.err(error, true);
     }
@@ -209,56 +182,6 @@ class AuthService {
     }
     const origin = EnvVars.FrontendOrigin || "http://localhost:5173";
     logger.info(`${what} link for ${user.email}: ${origin}${path}`);
-  }
-
-  static async resetPassword(token: string, password: string) {
-    if (String(password || "").length < 6) {
-      throw new Error("Password must be at least 6 characters.");
-    }
-
-    const raw = String(token || "").trim();
-    if (!raw) {
-      throw new Error("This reset link is invalid or has expired.");
-    }
-
-    const passwordResetTokenHash = crypto
-      .createHash("sha256")
-      .update(raw)
-      .digest("hex");
-    const user = await User.findOne({ where: { passwordResetTokenHash } });
-    const expires = user?.passwordResetExpires
-      ? new Date(user.passwordResetExpires).getTime()
-      : 0;
-    if (!user || !user.passwordResetTokenHash || expires < Date.now()) {
-      throw new Error("This reset link is invalid or has expired.");
-    }
-
-    const stored = Buffer.from(user.passwordResetTokenHash);
-    const given = Buffer.from(passwordResetTokenHash);
-    if (
-      stored.length !== given.length ||
-      !crypto.timingSafeEqual(stored, given)
-    ) {
-      throw new Error("This reset link is invalid or has expired.");
-    }
-    // A link sent before end-to-end encryption was turned on: resetting now
-    // would lose the vault's keys (see requestPasswordReset).
-    if (user.e2eEnabled) {
-      await user.update({ passwordResetTokenHash: null, passwordResetExpires: null });
-      throw new Error(MASTER_RESET_REFUSED);
-    }
-
-    await user.update({
-      password,
-      passwordResetTokenHash: null,
-      passwordResetExpires: null,
-    });
-    // The link reached this inbox: that confirms the address.
-    await EmailVerificationService.markVerified(user);
-    // Passkey unlock copies of the old user key go with it.
-    await UserPasskey.update({ prfUserKey: null }, { where: { userId: user.id } });
-    await SessionService.revokeAll(user.id);
-    return user.id;
   }
 
   static revokeSession(refreshToken?: string) {

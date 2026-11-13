@@ -39,7 +39,8 @@ const hashToken = (token: string) => crypto.createHash("sha256").update(token).d
 
 const usable = (user: User | null, hash: string) => {
   const expires = user?.passwordResetExpires ? new Date(user.passwordResetExpires).getTime() : 0;
-  if (!user?.passwordResetTokenHash || !user.e2eEnabled || expires < Date.now()) return false;
+  // Any account: one that never had keys gets its first ones here (stage 10.6).
+  if (!user?.passwordResetTokenHash || expires < Date.now()) return false;
   const stored = Buffer.from(user.passwordResetTokenHash);
   const given = Buffer.from(hash);
   return stored.length === given.length && crypto.timingSafeEqual(stored, given);

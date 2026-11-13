@@ -14,22 +14,16 @@ router.get("/", NoteController.getNotes as RequestHandler);
 router.get("/stats", NoteController.getNoteStats as RequestHandler);
 
 // Get all projects
-router.get("/projects", NoteController.getProjects as RequestHandler);
 
 router.get("/autofill", NoteController.autofill as RequestHandler);
 // Passkeys for other websites: the browser extension only.
 router.get("/passkeys", NoteController.passkeys as RequestHandler);
-router.post("/passkeys", NoteController.savePasskey as RequestHandler);
 // Leaked-password check: the browser checks, the API keeps the results.
 router.get("/health/breaches", NoteController.breachStatus as RequestHandler);
 router.post("/health/breaches", NoteController.saveBreachResults as RequestHandler);
 router.get("/export", NoteController.exportNotes as RequestHandler);
 // End-to-end items (stage 10.3): encrypt existing ones, or unseal to share.
-router.get("/e2e/pending", NoteController.e2ePending as RequestHandler);
 router.get("/e2e/autofill", NoteController.e2eAutofill as RequestHandler);
-router.post("/e2e/migrate", NoteController.e2eMigrate as RequestHandler);
-router.post("/e2e/unseal", NoteController.e2eUnseal as RequestHandler);
-router.post("/import", NoteController.importNotes as RequestHandler);
 router.delete("/trash", NoteController.emptyTrash as RequestHandler);
 router.post("/bulk", NoteController.bulkUpdate as RequestHandler);
 
@@ -47,7 +41,6 @@ router.get("/:id/activity", NoteController.activity as RequestHandler);
 // Version history: list, open one, put one back.
 router.get("/:id/versions", NoteController.listVersions as RequestHandler);
 router.get("/:id/versions/:versionId", NoteController.getVersion as RequestHandler);
-router.post("/:id/versions/:versionId/restore", NoteController.restoreVersion as RequestHandler);
 router.get("/:id/access", NoteController.accessList as RequestHandler);
 router.post("/:id/events", NoteController.recordEvent as RequestHandler);
 

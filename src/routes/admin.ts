@@ -95,7 +95,7 @@ export const ADMIN_ROUTES: {
   {
     method: "post",
     path: "/companies/:id/transfer-ownership",
-    permission: "support.actions",
+    permission: "companies.transfer",
     handler: AdminController.transferOwnership as RequestHandler,
   },
   {

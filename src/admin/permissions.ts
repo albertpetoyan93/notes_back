@@ -5,6 +5,7 @@ export type Permission =
   | "overview.revenue"
   | "users.view"
   | "companies.view"
+  | "companies.transfer"
   | "support.actions"
   | "billing.cancel"
   | "billing.manage"
@@ -18,6 +19,8 @@ export const PERMISSIONS: Record<Permission, StaffRole[]> = {
   "overview.revenue": ["admin"],
   "users.view": ["admin", "support"],
   "companies.view": ["admin", "support"],
+  // Changing who owns a company gives billing and recovery settings: admins only, not support.
+  "companies.transfer": ["admin"],
   "support.actions": ["admin", "support"],
   "billing.cancel": ["admin", "support"],
   "billing.manage": ["admin"],
