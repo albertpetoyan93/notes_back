@@ -18,8 +18,11 @@ interface EmergencyContactAttributes {
   email: string;
   waitDays: number;
   status: EmergencyStatus;
-  /** The owner's user key, sealed by their browser to the contact's public key. */
+  /** Before migration 058: the owner's user key sealed to the contact. Cleared when the owner's browser upgrades the row. */
   sealedUserKey?: string | null;
+  /** The owner's emergency key of `emergencyKeyVersion`, sealed by their browser to the contact's public key. */
+  sealedEmergencyKey?: string | null;
+  emergencyKeyVersion?: number | null;
   requestedAt?: Date | null;
   grantedAt?: Date | null;
   /** Reminders sent to the owner for the current request (halfway, last day). */
@@ -30,7 +33,7 @@ interface EmergencyContactAttributes {
 
 type EmergencyContactCreation = Optional<
   EmergencyContactAttributes,
-  "id" | "contactId" | "waitDays" | "status" | "sealedUserKey" | "requestedAt" | "grantedAt" | "remindersSent" | "createdAt" | "updatedAt"
+  "id" | "contactId" | "waitDays" | "status" | "sealedUserKey" | "sealedEmergencyKey" | "emergencyKeyVersion" | "requestedAt" | "grantedAt" | "remindersSent" | "createdAt" | "updatedAt"
 >;
 
 class EmergencyContact
@@ -44,6 +47,8 @@ class EmergencyContact
   public waitDays!: number;
   public status!: EmergencyStatus;
   public sealedUserKey?: string | null;
+  public sealedEmergencyKey?: string | null;
+  public emergencyKeyVersion?: number | null;
   public requestedAt?: Date | null;
   public grantedAt?: Date | null;
   public remindersSent!: number;
@@ -60,6 +65,8 @@ EmergencyContact.init(
     waitDays: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 7 },
     status: { type: DataTypes.STRING(16), allowNull: false, defaultValue: "invited" },
     sealedUserKey: { type: DataTypes.TEXT, allowNull: true },
+    sealedEmergencyKey: { type: DataTypes.TEXT, allowNull: true },
+    emergencyKeyVersion: { type: DataTypes.INTEGER, allowNull: true },
     requestedAt: { type: DataTypes.DATE, allowNull: true },
     grantedAt: { type: DataTypes.DATE, allowNull: true },
     remindersSent: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },

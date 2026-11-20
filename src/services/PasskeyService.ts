@@ -13,6 +13,7 @@ import { isoBase64URL, isoUint8Array } from "@simplewebauthn/server/helpers";
 import EnvVars from "../common/EnvVars";
 import User from "../models/User";
 import UserPasskey from "../models/UserPasskey";
+import CompanyPolicyService from "./CompanyPolicyService";
 
 export class PasskeyError extends Error {}
 
@@ -194,6 +195,8 @@ class PasskeyService {
       backedUp: credentialBackedUp,
       name: cleanName(name),
     });
+    // A passkey meets a company's 2FA rule: no waiting for the cache.
+    CompanyPolicyService.clear(user.id);
     return publicPasskey(passkey);
   }
 
@@ -288,6 +291,8 @@ class PasskeyService {
     const passkey = await UserPasskey.findOne({ where: { id, userId } });
     if (!passkey) throw new PasskeyError("That passkey was not found.");
     await passkey.destroy();
+    // A passkey counts for a company's 2FA rule: the next check must see it gone.
+    CompanyPolicyService.clear(userId);
     return publicPasskey(passkey);
   }
 }

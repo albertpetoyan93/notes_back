@@ -9,7 +9,10 @@ import CollectionShare from "@src/models/CollectionShare";
 import Company from "@src/models/Company";
 import CompanyMember from "@src/models/CompanyMember";
 import { CompanyRecoveryKey, RecoveryCustodian } from "@src/models/CompanyRecovery";
+import EmergencyCollectionName from "@src/models/EmergencyCollectionName";
 import EmergencyContact from "@src/models/EmergencyContact";
+import EmergencyItemKey from "@src/models/EmergencyItemKey";
+import EmergencyKey from "@src/models/EmergencyKey";
 import ItemKey from "@src/models/ItemKey";
 import Note from "@src/models/Note";
 import NoteShare from "@src/models/NoteShare";
@@ -86,6 +89,9 @@ beforeEach(() => {
       { id: 1, grantorId: 3, contactId: 9, status: "confirmed", sealedUserKey: "old-sam-key" },
       { id: 2, grantorId: 9, contactId: 3, status: "confirmed", sealedUserKey: "pat-key-for-sam" },
     ]),
+    emergencyKeys: table(EmergencyKey, [{ id: 3, userId: 3, keyVersion: 2, wrappedKey: "sam-ek", rotate: false }]),
+    emergencyItemKeys: table(EmergencyItemKey, [{ id: 1, grantorId: 3, noteId: 4, keyVersion: 2, wrappedKey: "copy" }]),
+    emergencyNames: table(EmergencyCollectionName, [{ id: 1, grantorId: 3, collectionId: 40, keyVersion: 2, encName: "name" }]),
   };
 });
 
@@ -163,6 +169,21 @@ describe("account reset review fixes", () => {
     expect(db.emergency).toEqual([
       expect.objectContaining({ id: 1, status: "accepted", sealedUserKey: null }),
       expect.objectContaining({ id: 2, status: "accepted", sealedUserKey: null }),
+    ]);
+  });
+
+  it("the emergency key made with the old user key goes too, with its copies, both ways", async () => {
+    db.emergency[0].sealedEmergencyKey = "ek-for-pat";
+    db.emergency[0].emergencyKeyVersion = 2;
+    db.emergency[1].sealedEmergencyKey = "pat-ek-for-sam";
+    db.emergency[1].emergencyKeyVersion = 1;
+    await AccountResetService.reset(TOKEN, { ...bundle, confirm: "RESET" });
+    expect(db.emergencyKeys).toEqual([]);
+    expect(db.emergencyItemKeys).toEqual([]);
+    expect(db.emergencyNames).toEqual([]);
+    expect(db.emergency).toEqual([
+      expect.objectContaining({ id: 1, sealedEmergencyKey: null, emergencyKeyVersion: null }),
+      expect.objectContaining({ id: 2, sealedEmergencyKey: null, emergencyKeyVersion: null }),
     ]);
   });
 

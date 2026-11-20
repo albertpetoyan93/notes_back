@@ -8,7 +8,10 @@ import CollectionShare from "../models/CollectionShare";
 import Company from "../models/Company";
 import CompanyMember from "../models/CompanyMember";
 import { CompanyRecoveryKey, RecoveryCustodian } from "../models/CompanyRecovery";
+import EmergencyCollectionName from "../models/EmergencyCollectionName";
 import EmergencyContact from "../models/EmergencyContact";
+import EmergencyItemKey from "../models/EmergencyItemKey";
+import EmergencyKey from "../models/EmergencyKey";
 import ItemKey from "../models/ItemKey";
 import Note from "../models/Note";
 import NoteShare from "../models/NoteShare";
@@ -274,10 +277,14 @@ class AccountResetService {
       toConfirmAgain.push(...asContact.map((row) => row.grantorId));
       for (const side of ["grantorId", "contactId"] as const) {
         await EmergencyContact.update(
-          { status: "accepted", sealedUserKey: null },
+          { status: "accepted", sealedUserKey: null, sealedEmergencyKey: null, emergencyKeyVersion: null },
           { where: { [side]: user.id, status: { [Op.in]: SEALED } }, transaction }
         );
       }
+      // Their emergency key was wrapped with the old user key: gone, with its copies.
+      await EmergencyKey.destroy({ where: { userId: user.id }, transaction });
+      await EmergencyItemKey.destroy({ where: { grantorId: user.id }, transaction });
+      await EmergencyCollectionName.destroy({ where: { grantorId: user.id }, transaction });
       await SessionService.revokeAll(user.id, undefined, transaction);
     });
     if (wrongCode) {

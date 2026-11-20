@@ -320,3 +320,15 @@ describe("complete", () => {
     expect(notified()).toEqual([1, 2, 3, 4]);
   });
 });
+
+describe("F15 review: the company's 2FA rule", () => {
+  it("a recovery can't be asked for someone the rule blocks (they'd get a key they mustn't have)", async () => {
+    const UserPasskey = (await import("@src/models/UserPasskey")).default;
+    table(UserPasskey, []);
+    db.companies[0].policies = { require2fa: true };
+    db.users.find((user: any) => user.id === 3).twoFactorEnabled = false;
+    const err = await failure(VaultRecoveryService.create(7, 4, ask));
+    expect(err).toMatchObject({ status: 409 });
+    expect(err.message).toMatch(/two-factor sign-in/);
+  });
+});

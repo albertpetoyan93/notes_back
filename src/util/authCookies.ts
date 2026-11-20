@@ -4,7 +4,8 @@ export const ACCESS_COOKIE = "access_token";
 export const REFRESH_COOKIE = "refresh_token";
 
 export const ACCESS_MAX_AGE_MS = 15 * 60 * 1000;
-export const REFRESH_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+/** The vault app's refresh cookie: a web sign-in ends after 12 hours without use (F18). */
+export const REFRESH_MAX_AGE_MS = 12 * 60 * 60 * 1000;
 
 function baseOptions(): CookieOptions {
   const options: CookieOptions = {

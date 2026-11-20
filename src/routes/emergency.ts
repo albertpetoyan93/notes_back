@@ -11,6 +11,9 @@ router.get("/", EmergencyController.summary as RequestHandler);
 
 // The owner: trusted contacts.
 router.post("/", EmergencyController.invite as RequestHandler);
+// The owner's browser keeps the emergency key's copies up to date (before the /:id routes).
+router.get("/tasks", EmergencyController.tasks as RequestHandler);
+router.post("/keys", EmergencyController.saveKeys as RequestHandler);
 router.put("/:id", EmergencyController.setWait as RequestHandler);
 router.post("/:id/confirm", EmergencyController.confirm as RequestHandler);
 router.post("/:id/approve", EmergencyController.approve as RequestHandler);

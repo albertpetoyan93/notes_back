@@ -2,6 +2,7 @@ import { Op } from "sequelize";
 import Company, { CompanyPolicies } from "../models/Company";
 import CompanyMember from "../models/CompanyMember";
 import User from "../models/User";
+import { meetsTwoFactorRule } from "./twoFactorRule";
 
 export const POLICY_CHOICES = {
   minPasswordLength: [8, 12, 16, 20],
@@ -53,8 +54,8 @@ class CompanyPolicyService {
     const needs2fa = companies.filter((company) => company.policies?.require2fa);
     let blocked = new Set<number>();
     if (needs2fa.length) {
-      const user = await User.findByPk(userId, { attributes: ["id", "twoFactorEnabled"] });
-      if (!user?.twoFactorEnabled) blocked = new Set(needs2fa.map((company) => company.id));
+      // An authenticator app or a passkey meets the rule (twoFactorRule).
+      if (!(await meetsTwoFactorRule([userId])).has(userId)) blocked = new Set(needs2fa.map((company) => company.id));
     }
     const rules: UserRules = {
       blocked,
@@ -133,9 +134,10 @@ class CompanyPolicyService {
         },
       ],
     });
-    const without2fa = members
-      .map((member) => member.get("user") as User | null)
-      .filter((user): user is User => !!user && !user.twoFactorEnabled)
+    const people = members.map((member) => member.get("user") as User | null).filter((user): user is User => !!user);
+    const meets = await meetsTwoFactorRule(people.map((user) => user.id));
+    const without2fa = people
+      .filter((user) => !meets.has(user.id))
       .map((user) => ({ id: user.id, name: user.fullName || user.username, email: user.email }));
     return { policies: this.clean(company.policies || {}), without2fa };
   }
@@ -145,10 +147,9 @@ class CompanyPolicyService {
     const before = this.clean(company.policies || {});
     const next = this.clean(input);
     if (next.require2fa && !before.require2fa) {
-      const actor = await User.findByPk(userId, { attributes: ["id", "twoFactorEnabled"] });
-      if (!actor?.twoFactorEnabled) {
+      if (!(await meetsTwoFactorRule([userId])).has(userId)) {
         throw new PolicyError(
-          "Turn on two-factor authentication for your own account first, in Security settings."
+          "Set up two-factor sign-in for your own account first (an authenticator app or a passkey), in Security settings."
         );
       }
     }

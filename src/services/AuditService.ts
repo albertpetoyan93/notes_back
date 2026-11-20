@@ -24,6 +24,7 @@ export const AUDIT_ACTIONS = [
   "passkey_removed",
   "session_revoked",
   "other_sessions_revoked",
+  "session_token_reused",
   "password_reset",
   "session_unlocked",
   "unlock_failed",
@@ -145,6 +146,7 @@ export const ACCOUNT_ACTIONS: AuditAction[] = [
   "passkey_removed",
   "session_revoked",
   "other_sessions_revoked",
+  "session_token_reused",
   "password_reset",
   "session_unlocked",
   "unlock_failed",
@@ -190,6 +192,9 @@ export interface AuditInput {
   /** Never put secret values here. Titles, field names, permissions only. */
   details?: Record<string, unknown>;
   req?: Request;
+  /** Without a request (e.g. inside a service): where it came from. */
+  ip?: string | null;
+  userAgent?: string | null;
 }
 
 type AuditRow = AuditEvent & { actor?: User | null; target?: User | null };
@@ -253,8 +258,8 @@ class AuditService {
         companyId,
         targetUserId: input.targetUserId ?? null,
         details,
-        ip: input.req?.ip?.slice(0, 100) ?? null,
-        userAgent: input.req?.get("user-agent")?.slice(0, 500) ?? null,
+        ip: (input.req?.ip ?? input.ip)?.slice(0, 100) ?? null,
+        userAgent: (input.req?.get("user-agent") ?? input.userAgent)?.slice(0, 500) ?? null,
       });
       // Every kind of sign-in is logged here, so this one check covers them
       // all. It runs after the response, so sign-in isn't slowed by email.

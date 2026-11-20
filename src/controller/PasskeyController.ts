@@ -153,6 +153,10 @@ export default class PasskeyController {
         req.body?.challengeToken,
         req.body?.response
       );
+      // Every account has keys since stage 10.6; one without them gets its first ones through an account reset.
+      if (!user.e2eEnabled) {
+        throw new PasskeyError("This account needs a reset before you can sign in. Use “Forgot password” to get a link.");
+      }
       const session = await AuthService.issueSession(user, sessionMeta(req));
       setAuthCookies(res, session.accessToken, session.refreshToken);
       await AuditService.record({

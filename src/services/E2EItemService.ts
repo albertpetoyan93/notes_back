@@ -13,6 +13,7 @@ import NoteShare from "../models/NoteShare";
 import NoteVersion from "../models/NoteVersion";
 import User from "../models/User";
 import GroupService from "./GroupService";
+import { meetsTwoFactorRule } from "./twoFactorRule";
 
 /**
  * Items encrypted in the browser (E2E_DESIGN.md, stages 10.3 and 10.4).
@@ -182,7 +183,11 @@ class E2EItemService {
    * Everyone who may open each collection, with their public key (null without
    * keys). `extra`: people about to get access (a share being made).
    */
-  async membersOf(collectionIds: number[], extra?: Map<number, number[]>) {
+  /**
+   * `includeBlocked`: also people a company's 2FA rule blocks for now. They get no new key copies,
+   * but still count as having access, so a copy they hold doesn't trigger a key replacement (F15).
+   */
+  async membersOf(collectionIds: number[], extra?: Map<number, number[]>, options: { includeBlocked?: boolean } = {}) {
     const ids = [...new Set(collectionIds.filter((id) => Number.isInteger(id)))];
     const result = new Map<number, Member[]>();
     if (!ids.length) return result;
@@ -195,13 +200,12 @@ class E2EItemService {
       attributes: ["collectionId", "sharedWithUserId"],
     });
     const companyIds = [...new Set(collections.map((item) => item.companyId).filter((id): id is number => !!id))];
-    const activeCompanies = companyIds.length
-      ? new Set(
-          (await Company.findAll({ where: { id: { [Op.in]: companyIds }, status: "active" }, attributes: ["id"] })).map(
-            (company) => company.id
-          )
-        )
-      : new Set<number>();
+    const companyRows = companyIds.length
+      ? await Company.findAll({ where: { id: { [Op.in]: companyIds }, status: "active" }, attributes: ["id", "policies"] })
+      : [];
+    const activeCompanies = new Set(companyRows.map((company) => company.id));
+    // F15: where the company requires two-factor sign-in, someone without it gets no company key copy.
+    const needs2fa = new Set(companyRows.filter((company) => company.policies?.require2fa).map((company) => company.id));
     const companyMembers = activeCompanies.size
       ? await CompanyMember.findAll({
           where: { companyId: { [Op.in]: [...activeCompanies] }, status: "active", userId: { [Op.not]: null } },
@@ -213,6 +217,17 @@ class E2EItemService {
     const viaGroups = await GroupService.byCollection(
       collections.filter((item) => item.companyId && activeCompanies.has(item.companyId)).map((item) => item.id)
     );
+
+    const ruled = needs2fa.size && !options.includeBlocked
+      ? await meetsTwoFactorRule([
+          ...companyMembers.filter((row) => needs2fa.has(row.companyId)).map((row) => row.userId as number),
+          ...collections
+            .filter((item) => item.companyId && needs2fa.has(item.companyId))
+            .flatMap((item) => extra?.get(item.id) || []),
+        ])
+      : new Set<number>();
+    const blockedIn = (companyId: number | null, userId: number) =>
+      !options.includeBlocked && !!companyId && needs2fa.has(companyId) && !ruled.has(userId);
 
     const idsByCollection = new Map<number, Set<number>>();
     for (const collection of collections) {
@@ -236,6 +251,7 @@ class E2EItemService {
         sharedWith.forEach((userId) => people.add(userId));
       }
       (extra?.get(collection.id) || []).forEach((userId) => people.add(userId));
+      for (const userId of [...people]) if (blockedIn(collection.companyId ?? null, userId)) people.delete(userId);
       idsByCollection.set(collection.id, people);
     }
 
@@ -829,6 +845,8 @@ class E2EItemService {
     const collections = await this.managedCollections(userId);
     const ids = collections.map((item) => item.id);
     const members = await this.membersOf(ids);
+    // Who still has access, blocked or not: losing 2FA for a moment mustn't replace every vault key.
+    const entitled = await this.membersOf(ids, undefined, { includeBlocked: true });
     const holders = ids.length ? await CollectionKey.findAll({ where: { collectionId: { [Op.in]: ids } } }) : [];
     const encrypt: KeyNeeds["collections"] = [];
     const grant: (KeyNeeds["collections"][number] & { names?: string[] })[] = [];
@@ -853,7 +871,8 @@ class E2EItemService {
       const rows = holders.filter((row) => row.collectionId === collection.id);
       const mine = rows.find((row) => row.userId === userId && row.keyVersion === collection.e2eKeyVersion);
       if (!mine) continue;
-      const stale = rows.some((row) => !people.some((member) => member.userId === row.userId));
+      const stillIn = entitled.get(collection.id) || [];
+      const stale = rows.some((row) => !stillIn.some((member) => member.userId === row.userId));
       if (stale) {
         const links = await ItemKey.findAll({
           where: { containerType: "collection", containerId: collection.id },

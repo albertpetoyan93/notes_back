@@ -7,8 +7,8 @@ import sequelize from "../sequelize";
  * readable fields; they're cleared here so nothing server-encrypted is left.
  *
  * Refuses to run while any readable item or version exists (trashed ones too):
- * once the decrypt path is gone those could never be opened again. Turn
- * encryption on for those accounts, or delete the items, then run it again.
+ * once the decrypt path is gone those could never be opened again. Give those
+ * accounts keys (an account reset), or delete the items, then run it again.
  */
 export const useTransaction = false;
 
@@ -23,7 +23,7 @@ export async function up() {
   if (items || versions) {
     throw new Error(
       `${items} items and ${versions} versions are still readable (not end-to-end). ` +
-        "Turn encryption on for their accounts or delete them (npm run e2e:status lists them), then run the migration again."
+        'Delete them, or reset their accounts so they get keys, then run the migration again. To list them: SELECT id, "userId" FROM notes WHERE "e2e" IS NOT TRUE; SELECT id, "noteId" FROM note_versions WHERE "e2e" IS NOT TRUE;'
     );
   }
   await sequelize.query(

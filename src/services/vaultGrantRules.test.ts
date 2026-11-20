@@ -7,6 +7,7 @@ import CollectionShare from "@src/models/CollectionShare";
 import Company from "@src/models/Company";
 import CompanyMember from "@src/models/CompanyMember";
 import User from "@src/models/User";
+import UserPasskey from "@src/models/UserPasskey";
 import AuditService from "@src/services/AuditService";
 import CollectionService from "@src/services/CollectionService";
 import CompanyPolicyService from "@src/services/CompanyPolicyService";
@@ -67,6 +68,55 @@ afterEach(() => {
 });
 
 describe("managing vault grants", () => {
+  it("F15 review: a manager the 2FA rule blocks doesn't count as the vault's manager", async () => {
+    db.companies[0].policies = { require2fa: true };
+    db.users[0].twoFactorEnabled = true; // Olga, the owner, acts
+    table(UserPasskey, [{ id: 1, userId: 4, credentialId: "c", name: "Phone" }]); // Lu meets the rule; Mo doesn't
+    db.shares.push({ id: 50, collectionId: 41, sharedByUserId: 1, sharedWithUserId: 4, permission: "edit", manages: true, source: "direct", expiresAt: null });
+    const err = await failure(CollectionService.unshareCompanyCollection(7, 41, 1, { memberUserId: 4 }));
+    expect(err).toMatchObject({ status: 409, message: "A vault needs at least one manager." });
+  });
+
+  it("F15 review: a key holder who is blocked for a moment (2FA switched off) doesn't trigger a key replacement", async () => {
+    vi.spyOn(GroupService, "byCollection").mockResolvedValue(new Map() as never);
+    vi.mocked(CompanyPolicyService.forUser).mockResolvedValue({ blocked: new Set<number>() } as never);
+    db.companies[0].policies = { require2fa: true };
+    db.collections[0].e2eKeyVersion = 1;
+    db.users[2].twoFactorEnabled = true;
+    db.users[2].publicKey = "PK3";
+    db.users[3].publicKey = "PK4";
+    db.shares.push({ id: 41, collectionId: 41, sharedByUserId: 3, sharedWithUserId: 4, permission: "view", manages: false, source: "direct", expiresAt: null });
+    table(UserPasskey, []);
+    db.keys.push(
+      { id: 1, collectionId: 41, userId: 3, keyVersion: 1, wrappedKey: "k3" },
+      { id: 2, collectionId: 41, userId: 4, keyVersion: 1, wrappedKey: "k4" } // Lu got it while she had 2FA
+    );
+    const ItemKey = (await import("@src/models/ItemKey")).default;
+    const Note = (await import("@src/models/Note")).default;
+    vi.spyOn(ItemKey, "findAll").mockResolvedValue([] as never);
+    vi.spyOn(Note, "findAll").mockResolvedValue([] as never);
+    const tasks: any = await E2EItemService.tasks(3);
+    expect(tasks.rotate || []).toEqual([]);
+  });
+
+  it("F15: while the company requires 2FA, a member without it gets no key copy; with a passkey they do", async () => {
+    vi.spyOn(GroupService, "byCollection").mockResolvedValue(new Map() as never);
+    db.companies[0].policies = { require2fa: true };
+    db.users[2].twoFactorEnabled = true; // Mo uses an authenticator app
+    db.shares.push({ id: 40, collectionId: 41, sharedByUserId: 3, sharedWithUserId: 4, permission: "view", manages: false, source: "direct", expiresAt: null });
+    table(UserPasskey, []);
+    const ids = async () => ((await E2EItemService.membersOf([41])).get(41) || []).map((row) => row.userId).sort();
+    expect(await ids()).toEqual([3]);
+    // A copy made for her anyway is refused.
+    vi.spyOn(sequelize, "transaction").mockImplementation((async (fn: any) => fn({ id: "tx", LOCK: { UPDATE: "UPDATE" } })) as never);
+    const sealed = `e2e1x.${"a".repeat(43)}.${"b".repeat(16)}.${"c".repeat(40)}`;
+    const forLu = { collections: [{ collectionId: 41, keyVersion: 1, keys: [{ userId: 3, wrappedKey: sealed }, { userId: 4, wrappedKey: sealed }] }] };
+    expect(await failure(E2EItemService.applyKeys(3, forLu))).toMatchObject({ status: 400, message: "A key was made for someone without access." });
+    // Lu adds a passkey: she meets the rule, so the next handoff includes her.
+    table(UserPasskey, [{ id: 1, userId: 4, credentialId: "c", name: "Phone" }]);
+    expect(await ids()).toEqual([3, 4]);
+  });
+
   it("SEC06: a manager the company's 2FA rule blocks can't share the vault or get its key tasks", async () => {
     vi.mocked(CompanyPolicyService.forUser).mockResolvedValue({ blocked: new Set<number>([7]) } as never);
     expect((await failure(CollectionService.shareCompanyCollection(7, 41, 3, "people", "view", ["lu@acme.com"]))).status).toBe(403);

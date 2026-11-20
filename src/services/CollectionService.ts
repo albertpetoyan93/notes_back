@@ -7,6 +7,7 @@ import Collection from "../models/Collection";
 import CollectionNote from "../models/CollectionNote";
 import CollectionShare from "../models/CollectionShare";
 import Company from "../models/Company";
+import { meetsTwoFactorRule } from "./twoFactorRule";
 import CompanyMember from "../models/CompanyMember";
 import Note from "../models/Note";
 import User from "../models/User";
@@ -377,7 +378,11 @@ class CollectionService {
   }
 
   /** Active company members who manage this vault, besides `except`. */
-  async otherManagers(companyId: number, collectionId: number, except: number) {
+  /**
+   * `able`: only managers who can act now. One a company's 2FA rule blocks gets no key tasks,
+   * so they don't count as the vault still having a manager (F15). Notices still go to all.
+   */
+  async otherManagers(companyId: number, collectionId: number, except: number, options: { able?: boolean } = {}) {
     const shares = await CollectionShare.findAll({
       where: this.activeShareFilter({ collectionId, manages: true, sharedWithUserId: { [Op.ne]: except } }),
       attributes: ["sharedWithUserId"],
@@ -387,7 +392,12 @@ class CollectionService {
       where: { companyId, status: "active", userId: { [Op.in]: shares.map((row) => row.sharedWithUserId) } },
       attributes: ["userId"],
     });
-    return active.map((row) => row.userId as number);
+    const ids = active.map((row) => row.userId as number);
+    if (!options.able || !ids.length) return ids;
+    const company = await Company.findByPk(companyId, { attributes: ["id", "policies"] });
+    if (!company?.policies?.require2fa) return ids;
+    const meets = await meetsTwoFactorRule(ids);
+    return ids.filter((id) => meets.has(id));
   }
 
   /**
@@ -402,7 +412,7 @@ class CollectionService {
     });
     let dropped = 0;
     for (const share of legacy) {
-      if (share.manages && !(await this.otherManagers(companyId, share.collectionId, userId)).length) continue;
+      if (share.manages && !(await this.otherManagers(companyId, share.collectionId, userId, { able: true })).length) continue;
       await CollectionShare.destroy({ where: { id: share.id } });
       dropped += 1;
     }
@@ -416,7 +426,7 @@ class CollectionService {
     });
     for (const share of raised) {
       const keepManaging =
-        !share.priorManages && share.manages && !(await this.otherManagers(companyId, share.collectionId, userId)).length;
+        !share.priorManages && share.manages && !(await this.otherManagers(companyId, share.collectionId, userId, { able: true })).length;
       await share.update({
         permission: share.priorPermission as SharePermission,
         manages: !!share.priorManages || keepManaging,
@@ -433,7 +443,7 @@ class CollectionService {
       where: this.activeShareFilter({ collectionId, sharedWithUserId: targetUserId, manages: true }),
     });
     if (!target) return;
-    if (!(await this.otherManagers(companyId, collectionId, targetUserId)).length) {
+    if (!(await this.otherManagers(companyId, collectionId, targetUserId, { able: true })).length) {
       throw Object.assign(new Error("A vault needs at least one manager."), { status: 409 });
     }
   }

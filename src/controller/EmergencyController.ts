@@ -35,12 +35,20 @@ export default class EmergencyController {
   static setWait = async (req: any, res: Response) =>
     respond(res, "Could not change the waiting time", () => EmergencyAccessService.setWait(req.user.id, id(req), req.body?.waitDays));
 
-  /** Body: { sealedUserKey }: the user key, sealed in the owner's browser to the contact. */
+  /** Body: { sealedEmergencyKey, keyVersion }: the emergency key, sealed in the owner's browser to the contact. */
   static confirm = async (req: any, res: Response) =>
     respond(res, "Could not confirm the contact", async () => {
-      await EmergencyAccessService.confirm(req.user.id, id(req), req.body?.sealedUserKey);
+      await EmergencyAccessService.confirm(req.user.id, id(req), req.body || {});
       await AuditService.record({ actorId: req.user.id, action: "emergency_confirmed", details: { contactRow: id(req) }, req });
     });
+
+  /** The owner's browser: what to make with the emergency key (background, after unlock). */
+  static tasks = async (req: any, res: Response) =>
+    respond(res, "Could not load emergency access tasks", () => EmergencyAccessService.tasks(req.user.id));
+
+  /** Body: { keyVersion, emergencyKey? , items?, collections?, contacts? } made by the owner's browser. */
+  static saveKeys = async (req: any, res: Response) =>
+    respond(res, "Could not save emergency access keys", () => EmergencyAccessService.saveKeys(req.user.id, req.body || {}));
 
   static approve = async (req: any, res: Response) =>
     respond(res, "Could not approve the request", async () => {

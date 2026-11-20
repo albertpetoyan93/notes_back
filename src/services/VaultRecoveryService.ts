@@ -6,6 +6,7 @@ import CollectionShare from "../models/CollectionShare";
 import ItemKey from "../models/ItemKey";
 import Note from "../models/Note";
 import Company from "../models/Company";
+import { meetsTwoFactorRule } from "./twoFactorRule";
 import CompanyMember from "../models/CompanyMember";
 import { CompanyRecoveryKey, RecoveryRequest, VaultRecoveryKey } from "../models/CompanyRecovery";
 import User from "../models/User";
@@ -57,11 +58,19 @@ class VaultRecoveryService {
     }
   }
 
-  /** The person who gets the key: an active member with end-to-end encryption on. */
+  /** The company requires two-factor sign-in and this person doesn't use it (F15): no key for them. */
+  private async blockedBy2fa(companyId: number, userId: number) {
+    const company = await Company.findByPk(companyId, { attributes: ["id", "policies"] });
+    if (!company?.policies?.require2fa) return false;
+    return !(await meetsTwoFactorRule([userId])).has(userId);
+  }
+
+  /** The person who gets the key: an active member with end-to-end encryption on, who meets the company's 2FA rule. */
   private async grantee(companyId: number, userId: number) {
     const member = await this.membership(companyId, userId);
     const user = member ? await User.findByPk(userId, { attributes: ["id", "email", "e2eEnabled", "publicKey"] }) : null;
     if (!user?.e2eEnabled || !user.publicKey) return null;
+    if (await this.blockedBy2fa(companyId, userId)) return null;
     return user;
   }
 
@@ -131,6 +140,12 @@ class VaultRecoveryService {
       })) > 0;
     if (!openable) throw new RecoveryError("This vault has no recovery copy yet.", 409);
     const granteeUserId = Number(input?.granteeUserId);
+    if (Number.isInteger(granteeUserId) && (await this.blockedBy2fa(companyId, granteeUserId))) {
+      throw new RecoveryError(
+        "That person must set up two-factor sign-in (an authenticator app or a passkey) first: the company requires it.",
+        409
+      );
+    }
     if (!(await this.grantee(companyId, granteeUserId))) {
       throw new RecoveryError("That person must be an active member with end-to-end encryption on.", 409);
     }
@@ -324,7 +339,8 @@ class VaultRecoveryService {
     const reaches =
       !!access && (access.permission === "owner" || access.permission === "edit" || access.permission === request.permission);
     // ADR-002: a vault with no active manager gets one in whoever it's recovered for.
-    const needsManager = !(await CollectionService.otherManagers(companyId, request.collectionId, grantee.id)).length;
+    // A manager the company's 2FA rule blocks can't hand keys: the vault still needs one (F15).
+    const needsManager = !(await CollectionService.otherManagers(companyId, request.collectionId, grantee.id, { able: true })).length;
     const completedAt = new Date();
     await sequelize.transaction(async (transaction) => {
       // First, and only from approved: a cancel (or another completion) that landed meanwhile wins.

@@ -9,6 +9,7 @@ import { RecoveryCustodian } from "../models/CompanyRecovery";
 import User from "../models/User";
 import { formatCompanyName } from "../util/formatCompanyName";
 import CompanyBilling from "./CompanyBilling";
+import { meetsTwoFactorRule } from "./twoFactorRule";
 import CompanyPolicyService from "./CompanyPolicyService";
 import EmailService from "./EmailService";
 import GroupService from "./GroupService";
@@ -122,10 +123,13 @@ class CompanyService {
       throw Object.assign(new Error("Unauthorized"), { status: 401 });
     }
 
+    // F15: new companies require two-factor sign-in, unless that would lock out the
+    // creator (no authenticator app or passkey yet): then it starts off and they're prompted.
+    const policies = CompanyPolicyService.clean({ require2fa: (await meetsTwoFactorRule([userId])).has(userId) });
     const transaction = await sequelize.transaction();
     try {
       const company = await Company.create(
-        { name: trimmed, status: "active" },
+        { name: trimmed, status: "active", policies },
         { transaction }
       );
       await CompanyMember.create(
@@ -148,7 +152,7 @@ class CompanyService {
         role: "owner",
         memberStatus: "active",
         expiresAt: null,
-        policies: CompanyPolicyService.clean({}),
+        policies,
         blocked: null,
         trialEndsAt: trial?.trialEndsAt ? new Date(trial.trialEndsAt).toISOString() : null,
       };

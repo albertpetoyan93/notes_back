@@ -27,7 +27,11 @@ describe("migration 057", () => {
   it("refuses to run while any readable item or version exists, trashed ones too", async () => {
     const query = vi.spyOn(sequelize, "query").mockImplementation((async (sql: string) =>
       /FROM "notes"/.test(sql) ? [{ count: "2" }] : /FROM "note_versions"/.test(sql) ? [{ count: "1" }] : []) as never);
-    await expect(up()).rejects.toThrow(/2 items and 1 version/);
+    const err = await up().catch((error) => error);
+    expect(err.message).toMatch(/2 items and 1 version/);
+    // It names a query the operator can run, not a script that no longer exists.
+    expect(err.message).not.toMatch(/e2e:status/);
+    expect(err.message).toMatch(/SELECT/);
     expect(query.mock.calls.some(([sql]) => /UPDATE/.test(String(sql)))).toBe(false);
   });
 

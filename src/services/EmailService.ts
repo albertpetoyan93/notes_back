@@ -128,14 +128,14 @@ class EmailService {
     const link = `${origin}/auth/confirm-email?token=${encodeURIComponent(input.token)}`;
     const subject = "Confirm your email for 2keevo";
     const text = [
-      "Confirm this email address for your 2keevo account. Until you do, you can't receive invites or shares sent to it.",
+      "Confirm this email address for your 2keevo account. Until you do, you can't receive invites or shares sent to it. Please confirm within 7 days: an unconfirmed account with nothing in it is removed after that.",
       "",
       link,
       "",
       "The link works once, for 24 hours. If you didn't sign up, ignore this email: the account is removed after 7 days.",
     ].join("\n");
     const html = `<div style="font-family:Segoe UI,sans-serif;color:#1f2937;line-height:1.5;">
-<p style="margin:0 0 16px;">Confirm this email address for your 2keevo account. Until you do, you can't receive invites or shares sent to it.</p>
+<p style="margin:0 0 16px;">Confirm this email address for your 2keevo account. Until you do, you can't receive invites or shares sent to it. Please confirm within 7 days: an unconfirmed account with nothing in it is removed after that.</p>
 <p style="margin:0 0 20px;"><a href="${escapeHtml(link)}" style="display:inline-block;background:#6d5efc;color:#ffffff;text-decoration:none;padding:10px 16px;border-radius:8px;">Confirm my email</a></p>
 <p style="margin:0;color:#6b7280;font-size:13px;">The link works once, for 24 hours. If you didn't sign up, ignore this email: the account is removed after 7 days.</p>
 </div>`;

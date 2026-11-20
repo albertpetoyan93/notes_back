@@ -49,3 +49,11 @@ describe("which address an email comes from", () => {
     expect(sentFrom()).toBe("2keevo <support@2keevo.com>");
   });
 });
+
+describe("the confirmation email", () => {
+  it("tells the person an empty account they don't confirm is removed after 7 days", async () => {
+    await EmailService.sendEmailConfirmation({ to: "sam@acme.com", token: "t" });
+    const text = (sendMail.mock.calls.at(-1)![0] as { text: string }).text;
+    expect(text).toMatch(/confirm within 7 days/i);
+  });
+});

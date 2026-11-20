@@ -5,6 +5,10 @@ export default defineConfig({
   test: {
     include: ["src/**/*.test.ts"],
     environment: "node",
+    // Separate processes: the thread pool sometimes crashed the whole run ("Maximum call stack size exceeded" in tinypool).
+    pool: "forks",
+    // Some tests import whole services on first use; under a full parallel run 5 s is too tight.
+    testTimeout: 15_000,
     // Dummy values so EnvVars / sequelize.ts load without a .env file (Sequelize connects lazily).
     env: {
       NODE_ENV: "test",

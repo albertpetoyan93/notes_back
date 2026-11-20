@@ -5,17 +5,26 @@ import EnvVars from "../common/EnvVars";
 import User from "../models/User";
 import UserSession, { SessionKind } from "../models/UserSession";
 import CompanyPolicyService from "./CompanyPolicyService";
-import { REFRESH_MAX_AGE_MS } from "../util/authCookies";
+import AuditService from "./AuditService";
 
 /**
- * A rotated web refresh token keeps working this long, so tabs that refresh at
- * the same moment do not sign each other out (the browser shares the cookie).
+ * A rotated refresh token keeps working this long, so tabs (which share the
+ * cookie) or the extension's popup and background, refreshing at the same
+ * moment, don't sign each other out. After that, using it again ends the sign-in.
  */
 const ROTATION_GRACE_MS = 30 * 1000;
 
 /** Staff sessions end after 30 minutes without use, and 12 hours after sign-in. */
 export const ADMIN_IDLE_MS = 30 * 60 * 1000;
 export const ADMIN_MAX_MS = 12 * 60 * 60 * 1000;
+
+/**
+ * A vault app sign-in ends after 12 hours without use (F18; owner's decision
+ * 20 Nov: counted from the last real input, not from sign-in). The extension
+ * keeps 7 days: it locks on its own timer and unlocking needs the master password.
+ */
+export const WEB_IDLE_MS = 12 * 60 * 60 * 1000;
+export const EXTENSION_SESSION_MS = 7 * 24 * 60 * 60 * 1000;
 
 export function adminSessionUsable(
   s: { createdAt: Date; lastActiveAt: Date | null },
@@ -71,8 +80,13 @@ function newTokenId() {
   return crypto.randomBytes(32).toString("hex");
 }
 
-function expiry() {
-  return new Date(Date.now() + REFRESH_MAX_AGE_MS);
+function lifetime(kind: SessionKind) {
+  if (kind === "admin") return ADMIN_MAX_MS;
+  return kind === "web" ? WEB_IDLE_MS : EXTENSION_SESSION_MS;
+}
+
+function expiry(kind: SessionKind) {
+  return new Date(Date.now() + lifetime(kind));
 }
 
 type AccessType = "access" | "admin_access";
@@ -119,20 +133,20 @@ class SessionService {
       tokenHash: hash(tokenId),
       lastUsedAt: new Date(),
       lastActiveAt: new Date(),
-      expiresAt: kind === "admin" ? new Date(Date.now() + ADMIN_MAX_MS) : expiry(),
+      expiresAt: expiry(kind),
       ...metaFields(meta),
     });
 
     return {
       accessToken: this.signAccessToken(userId, session.id, accessType(kind)),
-      refreshToken: this.signRefreshToken(userId, session.id, tokenId),
+      refreshToken: this.signRefreshToken(userId, session.id, tokenId, kind),
       sessionId: session.id,
     };
   }
 
   /**
    * Exchange a refresh token for new tokens. The presented token stops working,
-   * except for a short grace period on the web (see ROTATION_GRACE_MS).
+   * except for a short grace period (see ROTATION_GRACE_MS).
    */
   static async rotate(
     refreshToken: string | undefined,
@@ -163,6 +177,14 @@ class SessionService {
     ) {
       throw new RefreshError("session_expired", { sid: session.id, kind });
     }
+    if (kind === "web") {
+      // Real input only (touch/unlock); a locked tab polling in the background doesn't count.
+      const lastUse = new Date(session.lastActiveAt ?? session.createdAt).getTime();
+      if (Date.now() - lastUse > WEB_IDLE_MS) {
+        await session.destroy();
+        throw new RefreshError("idle_signed_out", { sid: session.id });
+      }
+    }
     await refuseSuspended(session.userId);
     // A company policy can limit how old a sign-in may get.
     const { maxSessionDays } = await CompanyPolicyService.forUser(session.userId);
@@ -184,7 +206,7 @@ class SessionService {
         rotatedAt: new Date(),
         lastUsedAt: new Date(),
         // An admin session ends 12 hours after sign-in, however often it refreshes.
-        ...(kind === "admin" ? {} : { expiresAt: expiry() }),
+        ...(kind === "admin" ? {} : { expiresAt: expiry(kind) }),
         ...metaFields(meta),
       },
       { where: { id: session.id, tokenHash: presented } }
@@ -193,28 +215,43 @@ class SessionService {
     if (rotated === 1) {
       return {
         accessToken: this.signAccessToken(session.userId, session.id, accessType(kind)),
-        refreshToken: this.signRefreshToken(session.userId, session.id, tokenId),
+        refreshToken: this.signRefreshToken(session.userId, session.id, tokenId, kind),
         sessionId: session.id,
       };
     }
 
-    if (kind === "web") {
-      await session.reload();
-      const rotatedAt = session.rotatedAt
-        ? new Date(session.rotatedAt).getTime()
-        : 0;
-      if (
-        session.previousTokenHash === presented &&
-        Date.now() - rotatedAt < ROTATION_GRACE_MS
-      ) {
-        return {
-          accessToken: this.signAccessToken(session.userId, session.id),
-          refreshToken: null,
-          sessionId: session.id,
-        };
-      }
+    // Two parts of one browser refreshing at once (tabs share the cookie; the
+    // extension's popup and background each refresh): the second one in.
+    await session.reload();
+    const rotatedAt = session.rotatedAt ? new Date(session.rotatedAt).getTime() : 0;
+    const previous = session.previousTokenHash === presented;
+    if (previous && Date.now() - rotatedAt < ROTATION_GRACE_MS) {
+      return {
+        accessToken: this.signAccessToken(session.userId, session.id, accessType(kind)),
+        // The newest refresh token is already with the browser / extension.
+        refreshToken: null,
+        sessionId: session.id,
+      };
     }
 
+    // An old refresh token used again: someone may have copied it (F18, SEC05).
+    // End this sign-in on every copy, and always tell the owner. The last token
+    // again from the same device is most likely a lost answer (popup closed
+    // mid-refresh), so the log says so instead of sounding the alarm.
+    const sameDevice =
+      previous &&
+      !!meta.ip &&
+      meta.ip.slice(0, 100) === session.ip &&
+      (meta.userAgent ?? "").slice(0, 500) === (session.userAgent ?? "");
+    // Logged first: record() never throws, destroy() can.
+    await AuditService.record({
+      actorId: session.userId,
+      action: "session_token_reused",
+      details: sameDevice ? { kind, likelyLostAnswer: true } : { kind },
+      ip: meta.ip ?? null,
+      userAgent: meta.userAgent ?? null,
+    });
+    await session.destroy();
     throw new RefreshError("token_reused", {
       sid: session.id,
       previousMatches: session.previousTokenHash === presented,
@@ -399,9 +436,9 @@ class SessionService {
     });
   }
 
-  private static signRefreshToken(userId: number, sid: number, jti: string) {
+  private static signRefreshToken(userId: number, sid: number, jti: string, kind: SessionKind) {
     return jwt.sign({ userId, type: "refresh", sid, jti }, EnvVars.Jwt.Secret, {
-      expiresIn: "7d",
+      expiresIn: Math.round(lifetime(kind) / 1000),
     });
   }
 }

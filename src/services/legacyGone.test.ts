@@ -113,3 +113,17 @@ describe("stage 10.6 final review", () => {
     expect(json.content).toEqual({});
   });
 });
+
+describe("stage 10.6 follow-up: passkey sign-in", () => {
+  it("an account without keys can't sign in with a passkey (it needs an account reset)", async () => {
+    const PasskeyController = (await import("@src/controller/PasskeyController")).default;
+    const PasskeyService = (await import("@src/services/PasskeyService")).default;
+    const AuthService = (await import("@src/services/AuthService")).default;
+    vi.spyOn(PasskeyService, "authenticate").mockResolvedValue({ user: { id: 7, e2eEnabled: false }, passkey: { name: "Phone" } } as never);
+    const issue = vi.spyOn(AuthService, "issueSession").mockResolvedValue({ accessToken: "a", refreshToken: "r" } as never);
+    const res: any = { status: vi.fn(() => res), send: vi.fn(() => res), cookie: vi.fn(() => res) };
+    await PasskeyController.login({ body: {}, headers: {}, ip: "1.1.1.1" } as never, res, vi.fn());
+    expect(issue).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(401);
+  });
+});
