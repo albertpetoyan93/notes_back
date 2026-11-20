@@ -34,6 +34,14 @@ const discountCoupon = () => process.env.STRIPE_COUPON_DISCOUNT || DISCOUNT_COUP
 /** Prices are found by lookup key (`premium_year`, …), set by `npm run stripe:setup`. */
 export const lookupKey = (plan: PlanId, interval: Interval) => `${plan}_${interval}`;
 
+/** A subscription on a price that isn't one of 2keevo's plans (something else sold from the same Stripe account). */
+export class ForeignSubscriptionError extends Error {
+  constructor(subscriptionId: string) {
+    super(`Subscription ${subscriptionId} has a price 2keevo doesn't know.`);
+    this.name = "ForeignSubscriptionError";
+  }
+}
+
 const appUrl = () => (EnvVars.FrontendOrigin || "http://localhost:5173").replace(/\/$/, "");
 
 function ownerWhere(owner: Owner) {
@@ -374,6 +382,15 @@ class StripeService {
       });
       return true;
     } catch (error: any) {
+      // Not a 2keevo subscription: nothing to do, and retrying won't change that. Done, not failed.
+      if (error instanceof ForeignSubscriptionError) {
+        logger.warn(`Stripe webhook ${event.type} (${event.id}) ignored: ${error.message}`);
+        await sequelize.query(
+          `UPDATE "billing_events" SET "processedAt" = NOW(), "error" = :note WHERE id = :id`,
+          { replacements: { id: claim.id, note: `ignored: ${error.message}` } }
+        );
+        return true;
+      }
       await sequelize.query(`UPDATE "billing_events" SET "error" = :error WHERE id = :id`, {
         replacements: { id: claim.id, error: String(error?.message || error).slice(0, 2000) },
       });
@@ -435,7 +452,7 @@ class StripeService {
     const item = remote.items.data[0];
     const price = item?.price as Stripe.Price | undefined;
     const planned = price ? this.planOf(price) : null;
-    if (!planned) throw new Error(`Subscription ${remote.id} has a price 2keevo doesn't know.`);
+    if (!planned) throw new ForeignSubscriptionError(remote.id);
 
     const owner = await this.ownerOfRemote(remote);
     if (!owner) throw new Error(`Subscription ${remote.id} has no 2keevo owner.`);
