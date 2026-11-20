@@ -17,6 +17,7 @@ import { table } from "@src/services/recoveryTestDb";
 // Well-formed stand-ins for what browsers send (the server only checks the shape).
 const WRAPPED = (n: number) => `e2e1.${"a".repeat(16)}.${String(n).padEnd(64, "b")}`;
 const SEALED = (n: number) => `e2e1x.${"c".repeat(43)}.${"d".repeat(16)}.${String(n).padEnd(80, "e")}`;
+const PIN = (n: number) => `e2e1.${"p".repeat(16)}.${String(n).padEnd(60, "q")}`;
 const NAME = (n: number) => `e2e1.${"f".repeat(16)}.${String(n).padEnd(40, "g")}`;
 
 let db: Record<string, any[]>;
@@ -32,13 +33,13 @@ beforeEach(() => {
       { id: 3, email: "lu@x.com", e2eEnabled: true, publicKey: "lu-pub" },
     ]),
     notes: table(Note, [
-      { id: 10, userId: 1, e2e: true, e2eId: "e10", companyId: null },
-      { id: 11, userId: 1, e2e: true, e2eId: "e11", companyId: null },
+      { id: 10, userId: 1, e2e: true, e2eId: "e10", companyId: null, itemKey: "uk10" },
+      { id: 11, userId: 1, e2e: true, e2eId: "e11", companyId: null, itemKey: "uk11" },
       { id: 12, userId: 1, e2e: true, e2eId: "e12", companyId: null },
       { id: 13, userId: 2, e2e: true, e2eId: "e13", companyId: null },
     ]),
     collections: table(Collection, [
-      { id: 20, userId: 1, companyId: null, name: "", encName: "x" },
+      { id: 20, userId: 1, companyId: null, name: "", encName: "x", nameKey: "user" },
       { id: 21, userId: 1, companyId: 7, name: "", encName: "y" },
     ]),
     contacts: table(EmergencyContact, [
@@ -82,11 +83,12 @@ describe("emergency key: the owner's background tasks", () => {
     expect(await EmergencyAccessService.tasks(1)).toMatchObject({ keyVersion: null, emergencyKey: null, rotate: true, contacts: [] });
     await firstKey();
     const tasks = await EmergencyAccessService.tasks(1);
+    // With the owner's own user-key wrap: the browser opens it itself, so it can't be fed a company item's key.
     expect(tasks.items).toEqual([
-      { noteId: 10, e2eId: "e10" },
-      { noteId: 11, e2eId: "e11" },
+      { noteId: 10, e2eId: "e10", itemKey: "uk10" },
+      { noteId: 11, e2eId: "e11", itemKey: "uk11" },
     ]);
-    expect(tasks.collections).toEqual([{ id: 20 }]);
+    expect(tasks.collections).toEqual([{ id: 20, name: "", encName: "x", nameKey: "user" }]);
     expect(tasks.contacts).toEqual([]);
   });
 
@@ -103,17 +105,19 @@ describe("emergency key: the owner's background tasks", () => {
     tasks = await EmergencyAccessService.tasks(1);
     expect(tasks.items).toEqual([]);
     expect(tasks.collections).toEqual([]);
-    expect(tasks.contacts).toEqual([{ id: 5, publicKey: "pat-pub" }]);
+    expect(tasks.contacts).toEqual([{ id: 5, publicKey: "pat-pub", pinnedKey: null }]);
   });
 
   it("sealing a contact replaces the old user-key copy", async () => {
     await firstKey();
     await copyEverything();
-    await EmergencyAccessService.saveKeys(1, { keyVersion: 1, contacts: [{ id: 5, sealedKey: SEALED(5) }] });
+    await EmergencyAccessService.saveKeys(1, { keyVersion: 1, contacts: [{ id: 5, sealedKey: SEALED(5), pinnedKey: PIN(5) }] });
     expect(db.contacts.find((row) => row.id === 5)).toMatchObject({
       sealedEmergencyKey: SEALED(5),
       emergencyKeyVersion: 1,
       sealedUserKey: null,
+      // The contact's key as the owner checked (or first saw) it, kept under the owner's user key.
+      pinnedKey: PIN(5),
     });
     expect((await EmergencyAccessService.tasks(1)).contacts).toEqual([]);
   });
@@ -169,11 +173,12 @@ describe("emergency key: confirming a contact", () => {
 
   it("the emergency key at the current version confirms them", async () => {
     await firstKey();
-    await EmergencyAccessService.confirm(1, 6, { sealedEmergencyKey: SEALED(6), keyVersion: 1 });
+    await EmergencyAccessService.confirm(1, 6, { sealedEmergencyKey: SEALED(6), keyVersion: 1, pinnedKey: PIN(6) });
     expect(db.contacts.find((row) => row.id === 6)).toMatchObject({
       status: "confirmed",
       sealedEmergencyKey: SEALED(6),
       emergencyKeyVersion: 1,
+      pinnedKey: PIN(6),
     });
   });
 
@@ -227,7 +232,7 @@ describe("emergency key: a new one after access ends", () => {
   const ready = async () => {
     await firstKey();
     await copyEverything();
-    await EmergencyAccessService.saveKeys(1, { keyVersion: 1, contacts: [{ id: 5, sealedKey: SEALED(5) }] });
+    await EmergencyAccessService.saveKeys(1, { keyVersion: 1, contacts: [{ id: 5, sealedKey: SEALED(5), pinnedKey: PIN(5) }] });
   };
   const rotateFlag = () => db.keys.find((key) => key.userId === 1)?.rotate;
 
@@ -258,24 +263,65 @@ describe("emergency key: a new one after access ends", () => {
     expect(rotateFlag()).toBe(false);
   });
 
-  it("the new key replaces every copy; the remaining contact gets it once items are copied again", async () => {
+  it("the new key: version 2, every item is listed to be copied again", async () => {
     await ready();
     db.contacts.push({ id: 7, grantorId: 1, contactId: 3, email: "lu@x.com", status: "granted", waitDays: 7, remindersSent: 0 });
     await EmergencyAccessService.remove(1, 7);
     await EmergencyAccessService.saveKeys(1, { keyVersion: 2, emergencyKey: WRAPPED(2) });
+    const tasks = await EmergencyAccessService.tasks(1);
+    expect(tasks).toMatchObject({ keyVersion: 2, rotate: false });
+    expect(tasks.items).toHaveLength(2);
+  });
+});
+
+describe("emergency key: mid review fixes", () => {
+  it("after a new key, a contact already on the emergency key is sealed again at once, even with items left; old copies stay until then", async () => {
+    await firstKey();
+    await copyEverything();
+    await EmergencyAccessService.saveKeys(1, { keyVersion: 1, contacts: [{ id: 5, sealedKey: SEALED(5), pinnedKey: PIN(5) }] });
+    db.contacts.push({ id: 7, grantorId: 1, contactId: 3, email: "lu@x.com", status: "granted", waitDays: 7, remindersSent: 0 });
+    await EmergencyAccessService.remove(1, 7);
+    await EmergencyAccessService.saveKeys(1, { keyVersion: 2, emergencyKey: WRAPPED(2) });
+
+    // Pat still holds version 1: its copies stay, so Pat's vault isn't emptied meanwhile.
+    expect(db.itemKeys.map((row) => row.keyVersion)).toEqual([1, 1]);
+    // Only item 10 can be copied this time (11 fails in the browser): Pat is sealed again anyway.
+    await EmergencyAccessService.saveKeys(1, { keyVersion: 2, items: [{ noteId: 10, wrappedKey: WRAPPED(10) }] });
+    const tasks = await EmergencyAccessService.tasks(1);
+    expect(tasks.items.map((item) => item.noteId)).toEqual([11]);
+    expect(tasks.contacts).toEqual([{ id: 5, publicKey: "pat-pub", pinnedKey: PIN(5) }]);
+
+    await EmergencyAccessService.saveKeys(1, { keyVersion: 2, contacts: [{ id: 5, sealedKey: SEALED(55) }] });
+    await EmergencyAccessService.tasks(1);
+    // Nobody holds version 1 any more: its copies go.
+    expect(db.itemKeys.map((row) => row.keyVersion)).toEqual([2]);
+  });
+
+  it("a contact still on the old user-key copy waits until every item is copied", async () => {
+    await firstKey();
+    await EmergencyAccessService.saveKeys(1, { keyVersion: 1, items: [{ noteId: 10, wrappedKey: WRAPPED(10) }] });
+    expect((await EmergencyAccessService.tasks(1)).contacts).toEqual([]);
+  });
+
+  it("lists at most 500 items at a time", async () => {
+    for (let i = 0; i < 600; i++) db.notes.push({ id: 1000 + i, userId: 1, e2e: true, e2eId: `x${i}`, companyId: null, itemKey: "k" });
+    await firstKey();
+    expect((await EmergencyAccessService.tasks(1)).items).toHaveLength(500);
+  });
+
+  it("another owner's copy of the same note doesn't count as this owner's", async () => {
+    await firstKey();
+    db.itemKeys.push({ id: 99, grantorId: 2, noteId: 10, keyVersion: 1, wrappedKey: WRAPPED(0) });
+    await EmergencyAccessService.saveKeys(1, { keyVersion: 1, items: [{ noteId: 10, wrappedKey: WRAPPED(10) }] });
+    expect(db.itemKeys.filter((row) => row.grantorId === 1)).toHaveLength(1);
+  });
+
+  it("no contacts left: the copies go", async () => {
+    await firstKey();
+    await copyEverything();
+    db.contacts.splice(0, db.contacts.length);
+    await EmergencyAccessService.tasks(1);
     expect(db.itemKeys).toEqual([]);
     expect(db.names).toEqual([]);
-    let tasks = await EmergencyAccessService.tasks(1);
-    expect(tasks).toMatchObject({ keyVersion: 2, rotate: false, contacts: [] });
-    expect(tasks.items).toHaveLength(2);
-    await EmergencyAccessService.saveKeys(1, {
-      keyVersion: 2,
-      items: [
-        { noteId: 10, wrappedKey: WRAPPED(10) },
-        { noteId: 11, wrappedKey: WRAPPED(11) },
-      ],
-    });
-    tasks = await EmergencyAccessService.tasks(1);
-    expect(tasks.contacts).toEqual([{ id: 5, publicKey: "pat-pub" }]);
   });
 });

@@ -40,8 +40,12 @@ const SEALED = /^e2e1x\.[A-Za-z0-9_-]{43}\.[A-Za-z0-9_-]{16}\.[A-Za-z0-9_-]{40,1
 const WRAPPED = /^e2e1\.[A-Za-z0-9_-]{16}\.[A-Za-z0-9_-]{40,100}$/;
 /** A collection name encrypted with the emergency key. */
 const ENC_NAME = /^e2e1\.[A-Za-z0-9_-]{16}\.[A-Za-z0-9_-]{22,2000}$/;
+/** Small encrypted JSON (the pinned contact key). */
+const WRAPPED_DATA = /^e2e1\.[A-Za-z0-9_-]{16}\.[A-Za-z0-9_-]{22,400}$/;
 /** Rows whose contact may hold the sealed key. */
 const SEALED_STATUSES = ["confirmed", "requested", "granted"];
+/** Items listed per pass: the owner's browser asks again for the rest. */
+const ITEMS_PER_PASS = 500;
 
 export class EmergencyError extends Error {
   constructor(message: string, public status = 400) {
@@ -177,7 +181,7 @@ class EmergencyAccessService {
   async confirm(
     grantorId: number,
     id: number,
-    input: { sealedEmergencyKey?: unknown; keyVersion?: unknown; sealedUserKey?: unknown }
+    input: { sealedEmergencyKey?: unknown; keyVersion?: unknown; pinnedKey?: unknown; sealedUserKey?: unknown }
   ) {
     const row = await this.ownRow(grantorId, id);
     if (row.status !== "accepted") throw new EmergencyError("This contact isn't waiting to be confirmed.", 409);
@@ -185,6 +189,8 @@ class EmergencyAccessService {
     if (!input.sealedEmergencyKey) throw new EmergencyError("Reload 2keevo and confirm again.", 409);
     const sealed = String(input.sealedEmergencyKey);
     if (!SEALED.test(sealed)) throw new EmergencyError("Bad key.");
+    const pinnedKey = String(input.pinnedKey || "");
+    if (!WRAPPED_DATA.test(pinnedKey)) throw new EmergencyError("Reload 2keevo and confirm again.", 409);
     const current = await EmergencyKey.findByPk(grantorId);
     if (!current || current.rotate || Number(input.keyVersion) !== current.keyVersion) {
       throw new EmergencyError("Reload 2keevo and confirm again.", 409);
@@ -194,6 +200,7 @@ class EmergencyAccessService {
       sealedEmergencyKey: sealed,
       emergencyKeyVersion: current.keyVersion,
       sealedUserKey: null,
+      pinnedKey,
     });
     if (row.contactId) {
       const grantor = await User.findByPk(grantorId, { attributes: ["fullName", "username", "email"] });
@@ -393,12 +400,16 @@ class EmergencyAccessService {
    * not work items: the same set the contact's vault shows) and personal collections.
    */
   private async personalSet(ownerId: number) {
-    const notes = await Note.findAll({ where: { userId: ownerId, e2e: true }, attributes: ["id", "e2eId", "companyId"] });
+    const notes = await Note.findAll({
+      where: { userId: ownerId, e2e: true },
+      attributes: ["id", "e2eId", "companyId", "itemKey"],
+      order: [["id", "ASC"]],
+    });
     const linked = await CollectionService.collectionsByNoteId(notes.map((note) => note.id));
     const items = notes.filter((note) => !isWorkItem(note, linked.get(note.id) || []));
     const collections = await Collection.findAll({
       where: { userId: ownerId, companyId: { [Op.is]: null } },
-      attributes: ["id"],
+      attributes: ["id", "name", "encName", "nameKey"],
     });
     return { items, collections };
   }
@@ -413,20 +424,26 @@ class EmergencyAccessService {
   async tasks(ownerId: number) {
     // Nobody to give it to: no key and no copies are made.
     if (!(await EmergencyContact.count({ where: { grantorId: ownerId } }))) {
+      // The last contact went: their copies go too.
+      await EmergencyItemKey.destroy({ where: { grantorId: ownerId } });
+      await EmergencyCollectionName.destroy({ where: { grantorId: ownerId } });
       return { keyVersion: null, emergencyKey: null, rotate: false, items: [], collections: [], contacts: [] };
     }
     const key = await EmergencyKey.findByPk(ownerId);
     const { items, collections } = await this.personalSet(ownerId);
-    await this.dropStale(ownerId, key?.keyVersion ?? 0, items.map((note) => note.id), collections.map((collection) => collection.id));
+    const rows = await EmergencyContact.findAll({ where: { grantorId: ownerId, status: { [Op.in]: SEALED_STATUSES } } });
+    // Versions still in use: the current one, and any a contact still holds until sealed again.
+    const versions = [key?.keyVersion ?? 0, ...rows.map((row) => row.emergencyKeyVersion).filter((v): v is number => !!v)];
+    await this.dropStale(ownerId, versions, items.map((note) => note.id), collections.map((collection) => collection.id));
 
     if (!key || key.rotate) {
       return {
         keyVersion: key?.keyVersion ?? null,
         emergencyKey: key?.wrappedKey ?? null,
         rotate: true,
-        items: [] as { noteId: number; e2eId: string }[],
-        collections: [] as { id: number }[],
-        contacts: [] as { id: number; publicKey: string }[],
+        items: [] as { noteId: number; e2eId: string; itemKey: string | null }[],
+        collections: [] as { id: number; name: string; encName: string | null; nameKey: string | null }[],
+        contacts: [] as { id: number; publicKey: string; pinnedKey: string | null }[],
       };
     }
 
@@ -443,26 +460,37 @@ class EmergencyAccessService {
         })
       ).map((row) => row.collectionId)
     );
+    // With the owner's own user-key wrap: their browser opens it itself, so it can't be
+    // made to copy a key it reaches through a company vault or someone's share.
     const missingItems = items
       .filter((note) => !copied.has(note.id))
-      .map((note) => ({ noteId: note.id, e2eId: String(note.e2eId) }));
-    const missingNames = collections.filter((collection) => !named.has(collection.id)).map((collection) => ({ id: collection.id }));
+      .slice(0, ITEMS_PER_PASS)
+      .map((note) => ({ noteId: note.id, e2eId: String(note.e2eId), itemKey: note.itemKey ?? null }));
+    const missingNames = collections
+      .filter((collection) => !named.has(collection.id))
+      .map((collection) => ({
+        id: collection.id,
+        name: collection.name,
+        encName: collection.encName ?? null,
+        nameKey: collection.nameKey ?? null,
+      }));
 
-    let contacts: { id: number; publicKey: string }[] = [];
-    if (!missingItems.length) {
-      const rows = await EmergencyContact.findAll({ where: { grantorId: ownerId, status: { [Op.in]: SEALED_STATUSES } } });
-      const stale = rows.filter((row) => row.contactId && row.emergencyKeyVersion !== key.keyVersion);
-      const people = stale.length
-        ? await User.findAll({
-            where: { id: { [Op.in]: stale.map((row) => row.contactId as number) } },
-            attributes: ["id", "e2eEnabled", "publicKey"],
-          })
-        : [];
-      contacts = stale
-        .map((row) => ({ row, person: people.find((person) => person.id === row.contactId) }))
-        .filter(({ person }) => !!person?.e2eEnabled && !!person.publicKey)
-        .map(({ row, person }) => ({ id: row.id, publicKey: person!.publicKey as string }));
-    }
+    // A contact still on the old user-key copy is moved over only once every item is
+    // copied, so the move never loses items. One already on the emergency key is sealed
+    // again at once: waiting would leave them with nothing after a new key.
+    const stale = rows.filter(
+      (row) => row.contactId && row.emergencyKeyVersion !== key.keyVersion && (!missingItems.length || !row.sealedUserKey)
+    );
+    const people = stale.length
+      ? await User.findAll({
+          where: { id: { [Op.in]: stale.map((row) => row.contactId as number) } },
+          attributes: ["id", "e2eEnabled", "publicKey"],
+        })
+      : [];
+    const contacts = stale
+      .map((row) => ({ row, person: people.find((person) => person.id === row.contactId) }))
+      .filter(({ person }) => !!person?.e2eEnabled && !!person.publicKey)
+      .map(({ row, person }) => ({ id: row.id, publicKey: person!.publicKey as string, pinnedKey: row.pinnedKey ?? null }));
 
     return {
       keyVersion: key.keyVersion,
@@ -475,11 +503,11 @@ class EmergencyAccessService {
   }
 
   /** Copies that open nothing the contact may see: items or collections no longer personal, or another key version. */
-  private async dropStale(ownerId: number, keyVersion: number, itemIds: number[], collectionIds: number[]) {
+  private async dropStale(ownerId: number, versions: number[], itemIds: number[], collectionIds: number[]) {
     await EmergencyItemKey.destroy({
       where: {
         grantorId: ownerId,
-        [Op.or]: [{ noteId: { [Op.notIn]: itemIds.length ? itemIds : [0] } }, { keyVersion: { [Op.ne]: keyVersion } }],
+        [Op.or]: [{ noteId: { [Op.notIn]: itemIds.length ? itemIds : [0] } }, { keyVersion: { [Op.notIn]: versions } }],
       },
     });
     await EmergencyCollectionName.destroy({
@@ -487,7 +515,7 @@ class EmergencyAccessService {
         grantorId: ownerId,
         [Op.or]: [
           { collectionId: { [Op.notIn]: collectionIds.length ? collectionIds : [0] } },
-          { keyVersion: { [Op.ne]: keyVersion } },
+          { keyVersion: { [Op.notIn]: versions } },
         ],
       },
     });
@@ -523,9 +551,8 @@ class EmergencyAccessService {
         );
         if (!updated) throw new EmergencyError("Already done in another tab.", 409);
       }
-      // Copies of the older key open nothing new and are dropped.
-      await EmergencyItemKey.destroy({ where: { grantorId: ownerId, keyVersion: { [Op.ne]: keyVersion } } });
-      await EmergencyCollectionName.destroy({ where: { grantorId: ownerId, keyVersion: { [Op.ne]: keyVersion } } });
+      // Copies of the older key stay while a contact still holds it (until sealed again,
+      // in the next pass); `tasks` drops them after that.
       return { keyVersion };
     }
 
@@ -553,7 +580,12 @@ class EmergencyAccessService {
     const rows = contacts.length ? await EmergencyContact.findAll({ where: { grantorId: ownerId } }) : [];
     for (const contact of contacts) {
       const row = rows.find((item) => item.id === Number(contact?.id));
-      if (!row || !SEALED_STATUSES.includes(row.status) || !SEALED.test(String(contact?.sealedKey || ""))) {
+      if (
+        !row ||
+        !SEALED_STATUSES.includes(row.status) ||
+        !SEALED.test(String(contact?.sealedKey || "")) ||
+        (contact?.pinnedKey !== undefined && !WRAPPED_DATA.test(String(contact.pinnedKey || "")))
+      ) {
         throw new EmergencyError("Contact not found", 404);
       }
     }
@@ -570,21 +602,28 @@ class EmergencyAccessService {
     for (const item of items) {
       const noteId = Number(item.noteId);
       await keep(
-        () => EmergencyItemKey.findOne({ where: { noteId, keyVersion } }),
+        () => EmergencyItemKey.findOne({ where: { grantorId: ownerId, noteId, keyVersion } }),
         () => EmergencyItemKey.create({ grantorId: ownerId, noteId, keyVersion, wrappedKey: String(item.wrappedKey) })
       );
     }
     for (const collection of collections) {
       const collectionId = Number(collection.collectionId);
       await keep(
-        () => EmergencyCollectionName.findOne({ where: { collectionId, keyVersion } }),
+        () => EmergencyCollectionName.findOne({ where: { grantorId: ownerId, collectionId, keyVersion } }),
         () => EmergencyCollectionName.create({ grantorId: ownerId, collectionId, keyVersion, encName: String(collection.encName) })
       );
     }
     for (const contact of contacts) {
       // The old user-key copy goes: from now on the contact gets the emergency key only.
+      const row = rows.find((item) => item.id === Number(contact.id))!;
       await EmergencyContact.update(
-        { sealedEmergencyKey: String(contact.sealedKey), emergencyKeyVersion: keyVersion, sealedUserKey: null },
+        {
+          sealedEmergencyKey: String(contact.sealedKey),
+          emergencyKeyVersion: keyVersion,
+          sealedUserKey: null,
+          // First seen at the upgrade from the old copy; never replaced here.
+          ...(row.pinnedKey || !contact.pinnedKey ? {} : { pinnedKey: String(contact.pinnedKey) }),
+        },
         { where: { id: Number(contact.id), grantorId: ownerId, status: { [Op.in]: SEALED_STATUSES } } }
       );
     }

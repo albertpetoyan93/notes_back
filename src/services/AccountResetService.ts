@@ -277,7 +277,7 @@ class AccountResetService {
       toConfirmAgain.push(...asContact.map((row) => row.grantorId));
       for (const side of ["grantorId", "contactId"] as const) {
         await EmergencyContact.update(
-          { status: "accepted", sealedUserKey: null, sealedEmergencyKey: null, emergencyKeyVersion: null },
+          { status: "accepted", sealedUserKey: null, sealedEmergencyKey: null, emergencyKeyVersion: null, pinnedKey: null },
           { where: { [side]: user.id, status: { [Op.in]: SEALED } }, transaction }
         );
       }

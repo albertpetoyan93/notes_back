@@ -23,6 +23,8 @@ interface EmergencyContactAttributes {
   /** The owner's emergency key of `emergencyKeyVersion`, sealed by their browser to the contact's public key. */
   sealedEmergencyKey?: string | null;
   emergencyKeyVersion?: number | null;
+  /** The contact's public key as the owner checked it, encrypted with the owner's user key (migration 059). */
+  pinnedKey?: string | null;
   requestedAt?: Date | null;
   grantedAt?: Date | null;
   /** Reminders sent to the owner for the current request (halfway, last day). */
@@ -33,7 +35,7 @@ interface EmergencyContactAttributes {
 
 type EmergencyContactCreation = Optional<
   EmergencyContactAttributes,
-  "id" | "contactId" | "waitDays" | "status" | "sealedUserKey" | "sealedEmergencyKey" | "emergencyKeyVersion" | "requestedAt" | "grantedAt" | "remindersSent" | "createdAt" | "updatedAt"
+  "id" | "contactId" | "waitDays" | "status" | "sealedUserKey" | "sealedEmergencyKey" | "emergencyKeyVersion" | "pinnedKey" | "requestedAt" | "grantedAt" | "remindersSent" | "createdAt" | "updatedAt"
 >;
 
 class EmergencyContact
@@ -49,6 +51,7 @@ class EmergencyContact
   public sealedUserKey?: string | null;
   public sealedEmergencyKey?: string | null;
   public emergencyKeyVersion?: number | null;
+  public pinnedKey?: string | null;
   public requestedAt?: Date | null;
   public grantedAt?: Date | null;
   public remindersSent!: number;
@@ -67,6 +70,7 @@ EmergencyContact.init(
     sealedUserKey: { type: DataTypes.TEXT, allowNull: true },
     sealedEmergencyKey: { type: DataTypes.TEXT, allowNull: true },
     emergencyKeyVersion: { type: DataTypes.INTEGER, allowNull: true },
+    pinnedKey: { type: DataTypes.TEXT, allowNull: true },
     requestedAt: { type: DataTypes.DATE, allowNull: true },
     grantedAt: { type: DataTypes.DATE, allowNull: true },
     remindersSent: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },
