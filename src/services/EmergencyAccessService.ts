@@ -62,6 +62,10 @@ const iso = (date?: Date | null) => (date ? new Date(date).toISOString() : null)
 const grantsAt = (row: EmergencyContact) =>
   row.requestedAt ? new Date(new Date(row.requestedAt).getTime() + row.waitDays * DAY_MS) : null;
 
+/** Confirmed before the emergency key and not confirmed again yet: holds the owner's user key. */
+const isLegacy = (row: EmergencyContact) =>
+  SEALED_STATUSES.includes(row.status) && !!row.sealedUserKey && !row.sealedEmergencyKey;
+
 const day = (date: Date) => date.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
 
 class EmergencyAccessService {
@@ -102,6 +106,7 @@ class EmergencyAccessService {
       waitDays: EMERGENCY_WAIT_DAYS,
       contacts: mine.map((row) => {
         const contact = person(row.contactId);
+        const needsReconfirm = isLegacy(row);
         return {
           id: row.id,
           email: row.email,
@@ -111,8 +116,10 @@ class EmergencyAccessService {
           requestedAt: iso(row.requestedAt),
           grantsAt: iso(grantsAt(row)),
           grantedAt: iso(row.grantedAt),
+          // Confirmed before the emergency key: the owner checks the fingerprint again to move them over.
+          needsReconfirm,
           // For the owner's browser to seal the key: the contact's public key (null until they have keys).
-          publicKey: row.status === "accepted" && contact?.e2eEnabled ? contact.publicKey || null : null,
+          publicKey: (row.status === "accepted" || needsReconfirm) && contact?.e2eEnabled ? contact.publicKey || null : null,
         };
       }),
       trustedBy: trusting.map((row) => {
@@ -184,7 +191,8 @@ class EmergencyAccessService {
     input: { sealedEmergencyKey?: unknown; keyVersion?: unknown; pinnedKey?: unknown; sealedUserKey?: unknown }
   ) {
     const row = await this.ownRow(grantorId, id);
-    if (row.status !== "accepted") throw new EmergencyError("This contact isn't waiting to be confirmed.", 409);
+    const again = isLegacy(row);
+    if (row.status !== "accepted" && !again) throw new EmergencyError("This contact isn't waiting to be confirmed.", 409);
     // An app from before migration 058 seals the user key: no longer accepted.
     if (!input.sealedEmergencyKey) throw new EmergencyError("Reload 2keevo and confirm again.", 409);
     const sealed = String(input.sealedEmergencyKey);
@@ -196,13 +204,14 @@ class EmergencyAccessService {
       throw new EmergencyError("Reload 2keevo and confirm again.", 409);
     }
     await row.update({
-      status: "confirmed",
+      // Confirmed again (moved to the emergency key): a request or access in progress stays.
+      status: again ? row.status : "confirmed",
       sealedEmergencyKey: sealed,
       emergencyKeyVersion: current.keyVersion,
       sealedUserKey: null,
       pinnedKey,
     });
-    if (row.contactId) {
+    if (row.contactId && !again) {
       const grantor = await User.findByPk(grantorId, { attributes: ["fullName", "username", "email"] });
       await NotificationService.create(row.contactId, `You're now ${displayName(grantor)}'s emergency contact.`);
     }
@@ -220,7 +229,16 @@ class EmergencyAccessService {
     const row = await this.ownRow(grantorId, id);
     if (row.status !== "requested" && row.status !== "granted") throw new EmergencyError("There's no request to refuse.", 409);
     const wasGranted = row.status === "granted";
-    await row.update({ status: "confirmed", requestedAt: null, grantedAt: null, remindersSent: 0 });
+    await row.update({
+      requestedAt: null,
+      grantedAt: null,
+      remindersSent: 0,
+      // Access that had been granted ended: they may have kept the key. They get no new
+      // one until the owner confirms them again (fingerprint), and the key is replaced.
+      ...(wasGranted
+        ? { status: "accepted", sealedUserKey: null, sealedEmergencyKey: null, emergencyKeyVersion: null, pinnedKey: null }
+        : { status: "confirmed" }),
+    });
     if (wasGranted) await this.askForNewKey(grantorId);
     const contact = row.contactId ? await User.findByPk(row.contactId, { attributes: ["id", "email"] }) : null;
     const grantor = await User.findByPk(grantorId, { attributes: ["fullName", "username", "email"] });
@@ -475,12 +493,9 @@ class EmergencyAccessService {
         nameKey: collection.nameKey ?? null,
       }));
 
-    // A contact still on the old user-key copy is moved over only once every item is
-    // copied, so the move never loses items. One already on the emergency key is sealed
-    // again at once: waiting would leave them with nothing after a new key.
-    const stale = rows.filter(
-      (row) => row.contactId && row.emergencyKeyVersion !== key.keyVersion && (!missingItems.length || !row.sealedUserKey)
-    );
+    // Sealed again automatically only to a key the owner checked (pinned at confirm).
+    // Contacts on the old user-key copy wait until the owner confirms them again.
+    const stale = rows.filter((row) => row.contactId && row.pinnedKey && row.emergencyKeyVersion !== key.keyVersion);
     const people = stale.length
       ? await User.findAll({
           where: { id: { [Op.in]: stale.map((row) => row.contactId as number) } },
@@ -580,12 +595,7 @@ class EmergencyAccessService {
     const rows = contacts.length ? await EmergencyContact.findAll({ where: { grantorId: ownerId } }) : [];
     for (const contact of contacts) {
       const row = rows.find((item) => item.id === Number(contact?.id));
-      if (
-        !row ||
-        !SEALED_STATUSES.includes(row.status) ||
-        !SEALED.test(String(contact?.sealedKey || "")) ||
-        (contact?.pinnedKey !== undefined && !WRAPPED_DATA.test(String(contact.pinnedKey || "")))
-      ) {
+      if (!row || !SEALED_STATUSES.includes(row.status) || !row.pinnedKey || !SEALED.test(String(contact?.sealedKey || ""))) {
         throw new EmergencyError("Contact not found", 404);
       }
     }
@@ -615,15 +625,8 @@ class EmergencyAccessService {
     }
     for (const contact of contacts) {
       // The old user-key copy goes: from now on the contact gets the emergency key only.
-      const row = rows.find((item) => item.id === Number(contact.id))!;
       await EmergencyContact.update(
-        {
-          sealedEmergencyKey: String(contact.sealedKey),
-          emergencyKeyVersion: keyVersion,
-          sealedUserKey: null,
-          // First seen at the upgrade from the old copy; never replaced here.
-          ...(row.pinnedKey || !contact.pinnedKey ? {} : { pinnedKey: String(contact.pinnedKey) }),
-        },
+        { sealedEmergencyKey: String(contact.sealedKey), emergencyKeyVersion: keyVersion },
         { where: { id: Number(contact.id), grantorId: ownerId, status: { [Op.in]: SEALED_STATUSES } } }
       );
     }

@@ -10,6 +10,7 @@ import User from "@src/models/User";
 import CollectionService from "@src/services/CollectionService";
 import EmergencyAccessService from "@src/services/EmergencyAccessService";
 import EmailService from "@src/services/EmailService";
+import EntitlementService from "@src/services/EntitlementService";
 import NoteService from "@src/services/NoteService";
 import NotificationService from "@src/services/NotificationService";
 import { table } from "@src/services/recoveryTestDb";
@@ -97,29 +98,42 @@ describe("emergency key: the owner's background tasks", () => {
     expect(await EmergencyAccessService.tasks(1)).toMatchObject({ rotate: false, items: [], collections: [], contacts: [] });
   });
 
-  it("once every item is copied, the confirmed contact is listed to be sealed (the invited one isn't)", async () => {
+  it("a contact on the old user-key copy is never sealed automatically: the owner confirms them again", async () => {
     await firstKey();
-    let tasks = await EmergencyAccessService.tasks(1);
-    expect(tasks).toMatchObject({ keyVersion: 1, emergencyKey: WRAPPED(1), rotate: false, contacts: [] });
     await copyEverything();
-    tasks = await EmergencyAccessService.tasks(1);
+    const tasks = await EmergencyAccessService.tasks(1);
     expect(tasks.items).toEqual([]);
     expect(tasks.collections).toEqual([]);
-    expect(tasks.contacts).toEqual([{ id: 5, publicKey: "pat-pub", pinnedKey: null }]);
+    expect(tasks.contacts).toEqual([]);
+    await expect(
+      EmergencyAccessService.saveKeys(1, { keyVersion: 1, contacts: [{ id: 5, sealedKey: SEALED(5), pinnedKey: PIN(5) }] })
+    ).rejects.toMatchObject({ status: 404 });
+    expect(db.contacts.find((row) => row.id === 5)).toMatchObject({ sealedUserKey: SEALED(0) });
   });
 
-  it("sealing a contact replaces the old user-key copy", async () => {
+  it("confirming an old contact again moves them to the emergency key, keeping their status", async () => {
     await firstKey();
-    await copyEverything();
-    await EmergencyAccessService.saveKeys(1, { keyVersion: 1, contacts: [{ id: 5, sealedKey: SEALED(5), pinnedKey: PIN(5) }] });
+    db.contacts.find((row) => row.id === 5)!.status = "granted";
+    await EmergencyAccessService.confirm(1, 5, { sealedEmergencyKey: SEALED(5), keyVersion: 1, pinnedKey: PIN(5) });
     expect(db.contacts.find((row) => row.id === 5)).toMatchObject({
+      status: "granted",
       sealedEmergencyKey: SEALED(5),
       emergencyKeyVersion: 1,
       sealedUserKey: null,
-      // The contact's key as the owner checked (or first saw) it, kept under the owner's user key.
+      // The contact's key as the owner checked it by fingerprint, under the owner's user key.
       pinnedKey: PIN(5),
     });
-    expect((await EmergencyAccessService.tasks(1)).contacts).toEqual([]);
+    // Already moved: there's nothing to confirm again.
+    await expect(
+      EmergencyAccessService.confirm(1, 5, { sealedEmergencyKey: SEALED(5), keyVersion: 1, pinnedKey: PIN(5) })
+    ).rejects.toMatchObject({ status: 409 });
+  });
+
+  it("the owner's page says which contacts to confirm again, with the key to check", async () => {
+    vi.spyOn(EntitlementService, "forUser").mockResolvedValue({ limits: { emergencyAccess: true } } as never);
+    const { contacts } = await EmergencyAccessService.summary(1);
+    expect(contacts.find((row: any) => row.id === 5)).toMatchObject({ needsReconfirm: true, publicKey: "pat-pub" });
+    expect(contacts.find((row: any) => row.id === 6)).toMatchObject({ needsReconfirm: false, publicKey: null });
   });
 
   it("a second tab making the first key too: refused, the first one stands", async () => {
@@ -232,7 +246,7 @@ describe("emergency key: a new one after access ends", () => {
   const ready = async () => {
     await firstKey();
     await copyEverything();
-    await EmergencyAccessService.saveKeys(1, { keyVersion: 1, contacts: [{ id: 5, sealedKey: SEALED(5), pinnedKey: PIN(5) }] });
+    await EmergencyAccessService.confirm(1, 5, { sealedEmergencyKey: SEALED(5), keyVersion: 1, pinnedKey: PIN(5) });
   };
   const rotateFlag = () => db.keys.find((key) => key.userId === 1)?.rotate;
 
@@ -278,7 +292,7 @@ describe("emergency key: mid review fixes", () => {
   it("after a new key, a contact already on the emergency key is sealed again at once, even with items left; old copies stay until then", async () => {
     await firstKey();
     await copyEverything();
-    await EmergencyAccessService.saveKeys(1, { keyVersion: 1, contacts: [{ id: 5, sealedKey: SEALED(5), pinnedKey: PIN(5) }] });
+    await EmergencyAccessService.confirm(1, 5, { sealedEmergencyKey: SEALED(5), keyVersion: 1, pinnedKey: PIN(5) });
     db.contacts.push({ id: 7, grantorId: 1, contactId: 3, email: "lu@x.com", status: "granted", waitDays: 7, remindersSent: 0 });
     await EmergencyAccessService.remove(1, 7);
     await EmergencyAccessService.saveKeys(1, { keyVersion: 2, emergencyKey: WRAPPED(2) });
@@ -297,10 +311,29 @@ describe("emergency key: mid review fixes", () => {
     expect(db.itemKeys.map((row) => row.keyVersion)).toEqual([2]);
   });
 
-  it("a contact still on the old user-key copy waits until every item is copied", async () => {
+  it("ending granted access: they must be confirmed again before they get any new key", async () => {
     await firstKey();
-    await EmergencyAccessService.saveKeys(1, { keyVersion: 1, items: [{ noteId: 10, wrappedKey: WRAPPED(10) }] });
+    await EmergencyAccessService.confirm(1, 5, { sealedEmergencyKey: SEALED(5), keyVersion: 1, pinnedKey: PIN(5) });
+    db.contacts.find((row) => row.id === 5)!.status = "granted";
+    vi.spyOn(EmailService, "sendEmergencyRefused").mockResolvedValue(true as never);
+    await EmergencyAccessService.refuse(1, 5);
+    expect(db.contacts.find((row) => row.id === 5)).toMatchObject({
+      status: "accepted",
+      sealedEmergencyKey: null,
+      emergencyKeyVersion: null,
+      pinnedKey: null,
+    });
+    await EmergencyAccessService.saveKeys(1, { keyVersion: 2, emergencyKey: WRAPPED(2) });
     expect((await EmergencyAccessService.tasks(1)).contacts).toEqual([]);
+  });
+
+  it("refusing a request that wasn't granted yet keeps them a ready contact", async () => {
+    await firstKey();
+    await EmergencyAccessService.confirm(1, 5, { sealedEmergencyKey: SEALED(5), keyVersion: 1, pinnedKey: PIN(5) });
+    db.contacts.find((row) => row.id === 5)!.status = "requested";
+    vi.spyOn(EmailService, "sendEmergencyRefused").mockResolvedValue(true as never);
+    await EmergencyAccessService.refuse(1, 5);
+    expect(db.contacts.find((row) => row.id === 5)).toMatchObject({ status: "confirmed", sealedEmergencyKey: SEALED(5) });
   });
 
   it("lists at most 500 items at a time", async () => {
