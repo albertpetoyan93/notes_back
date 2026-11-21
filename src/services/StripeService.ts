@@ -284,6 +284,10 @@ class StripeService {
       client_reference_id: "userId" in owner ? `user-${owner.userId}` : `company-${owner.companyId}`,
       line_items: [{ price: await this.priceId(plan, interval), quantity }],
       currency: await this.checkoutCurrency(owner, input.currency),
+      // Annaniks is the seller and handles VAT itself (Stripe Tax, OSS). Stripe's Managed
+      // Payments (Stripe as merchant of record) can be on by default for an account and
+      // doesn't allow the consent text below, so it's turned off here explicitly.
+      managed_payments: { enabled: false },
       subscription_data: { metadata, ...(trialEnd ? { trial_end: trialEnd } : {}) },
       metadata,
       ...(discounted ? { discounts: [{ coupon: discountCoupon() }] } : { allow_promotion_codes: true }),

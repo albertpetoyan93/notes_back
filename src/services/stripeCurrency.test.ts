@@ -55,6 +55,7 @@ describe("checkout page", () => {
 
     const params = fake.checkout.sessions.create.mock.calls[0][0];
     expect(params.currency).toBe("eur");
+    expect(params.managed_payments).toEqual({ enabled: false });
     expect(params.consent_collection).toEqual({ terms_of_service: "required" });
     expect(params.custom_text.terms_of_service_acceptance.message).toMatch(/right of withdrawal/);
     expect(params.tax_id_collection).toEqual({ enabled: true });
