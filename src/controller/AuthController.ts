@@ -15,6 +15,7 @@ import CompanyPolicyService from "@src/services/CompanyPolicyService";
 import E2EAccountService, { E2EError } from "@src/services/E2EAccountService";
 import { parseExtensionVersion } from "@src/services/admin/extensionVersion";
 import SignupSourceService from "@src/services/SignupSourceService";
+import { userByEmail } from "@src/util/userByEmail";
 
 export function publicUser(user: {
   id: number;
@@ -48,8 +49,7 @@ function notifyTwoFactorChanged(user: User, enabled: boolean) {
 }
 
 async function recordFailedLogin(req: Request, kind: "web" | "extension") {
-  const email = String(req.body?.email || "").trim();
-  const user = email ? await User.findOne({ where: { email }, attributes: ["id"] }) : null;
+  const user = await userByEmail(req.body?.email, ["id"]);
   if (!user) return;
   await AuditService.record({ actorId: user.id, action: "login_failed", details: { kind }, req });
 }

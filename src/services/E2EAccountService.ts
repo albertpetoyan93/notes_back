@@ -1,4 +1,3 @@
-import { Op } from "sequelize";
 import bcrypt from "bcrypt";
 import crypto from "crypto";
 import EnvVars from "../common/EnvVars";
@@ -7,6 +6,7 @@ import ItemKey from "../models/ItemKey";
 import User from "../models/User";
 import UserPasskey from "../models/UserPasskey";
 import SessionService from "./SessionService";
+import { userByEmail } from "../util/userByEmail";
 
 /**
  * Accounts with end-to-end encryption (E2E_DESIGN.md, stage 10.2). The
@@ -110,9 +110,7 @@ class E2EAccountService {
     if (!address) return { e2e: false };
     const attributes = ["id", "e2eEnabled", "kdfSalt", "kdfParams"];
     // Any letter case finds the account, so "BOB@x.com" can't tell an existing "bob@x.com" apart (SEC06).
-    const user =
-      (await User.findOne({ where: { email: address }, attributes })) ||
-      (await User.findOne({ where: { email: { [Op.iLike]: address.replace(/[\\%_]/g, "\\$&") } }, attributes }));
+    const user = await userByEmail(address, attributes);
     if (!user || !user.e2eEnabled || !user.kdfSalt || !user.kdfParams) {
       return { e2e: true, kdf: { ...DEFAULT_KDF, salt: madeUpSalt(address) } };
     }
@@ -177,7 +175,7 @@ class E2EAccountService {
 
   private async recoveryUser(email: unknown, recoveryAuth: unknown) {
     const proof = checkSecret(recoveryAuth, "recovery key");
-    const user = await User.findOne({ where: { email: String(email || "").trim() } });
+    const user = await userByEmail(email);
     const ok =
       !!user?.e2eEnabled &&
       !!user.recoveryAuthHash &&

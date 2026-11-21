@@ -12,6 +12,7 @@ import EnvVars from "../common/EnvVars";
 import { SessionKind } from "../models/UserSession";
 import SessionService, { SessionMeta } from "./SessionService";
 import E2EAccountService from "./E2EAccountService";
+import { userByEmail } from "../util/userByEmail";
 
 const RESET_MESSAGE =
   "If an account exists for that email, we sent a reset link.";
@@ -42,12 +43,11 @@ class AuthService {
    * Register a new user
    */
   static async register(data: RegisterData) {
-    // Check if user already exists
-    const existingUser = await User.findOne({
-      where: {
-        [Op.or]: [{ username: data.username }, { email: data.email }],
-      },
-    });
+    // Stored trimmed and in lower case, and any letter case counts as taken:
+    // "Bob@x.com" and "bob@x.com" are one inbox, so they must be one account.
+    const email = String(data.email || "").trim().toLowerCase();
+    const existingUser =
+      (await User.findOne({ where: { username: data.username } })) || (await userByEmail(email));
 
     if (existingUser) {
       throw new Error("Username or email already exists");
@@ -56,7 +56,7 @@ class AuthService {
     // Create new user (password will be hashed by the model hook)
     const user = await User.create({
       username: data.username,
-      email: data.email,
+      email,
       password: data.password,
       fullName: data.fullName,
       ...(data.e2e ? { ...data.e2e, e2eEnabled: true, e2eSince: new Date() } : {}),
@@ -74,8 +74,8 @@ class AuthService {
    * Login user
    */
   static async login(data: LoginData) {
-    // Find user by email
-    const user = await User.findOne({ where: { email: data.email } });
+    // Same lookup as prelogin: any letter case, spaces ignored.
+    const user = await userByEmail(data.email);
 
     if (!user) {
       throw new Error("Invalid credentials");
