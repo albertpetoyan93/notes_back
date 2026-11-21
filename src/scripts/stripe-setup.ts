@@ -137,6 +137,41 @@ async function main() {
     console.log("= customer portal");
   }
 
+  // A cheap live test: "2keevo live test", €0.50 / $0.50 a month (Stripe's smallest charge),
+  // read by 2keevo as Premium monthly. Use it by setting STRIPE_PRICE_PREMIUM_MONTH to its id,
+  // buy Premium monthly, refund, then remove the variable.
+  if (process.argv.includes("--test-price")) {
+    const all = await stripe.products.list({ limit: 100, active: true });
+    let testProduct = all.data.find((p) => p.metadata?.app === "2keevo" && p.metadata?.test === "true");
+    if (!testProduct) {
+      testProduct = await stripe.products.create({
+        name: "2keevo live test",
+        description: "Test purchase for checking live payments. Not for sale.",
+        tax_code: "txcd_10103001",
+        metadata: { app: "2keevo", test: "true" },
+      });
+      console.log(`+ product ${testProduct.name}`);
+    }
+    let [testPrice] = (await stripe.prices.list({ product: testProduct.id, active: true, limit: 1 })).data;
+    if (!testPrice) {
+      testPrice = await stripe.prices.create({
+        product: testProduct.id,
+        currency: "usd",
+        unit_amount: 50,
+        tax_behavior: "exclusive",
+        currency_options: { eur: { unit_amount: 50, tax_behavior: "inclusive" } },
+        recurring: { interval: "month" },
+        // No lookup_key (that's the real price's); metadata tells 2keevo it's Premium monthly.
+        metadata: { app: "2keevo", lookup_key: "premium_month", test: "true" },
+      });
+      console.log(`+ test price $0.50 / €0.50 per month (${testPrice.id})`);
+    } else {
+      console.log(`= test price (${testPrice.id})`);
+    }
+    console.log(`\n  To test: put STRIPE_PRICE_PREMIUM_MONTH=${testPrice.id} in the env file and restart.`);
+    console.log("  Buy Premium monthly, check it, refund it, then remove that line and restart.\n");
+  }
+
   // Webhook endpoint (production). Locally, use: stripe listen --forward-to localhost:9000/api/billing/webhooks/stripe
   const webhookArg = process.argv.find((arg) => arg.startsWith("--webhook-url="));
   if (webhookArg) {
