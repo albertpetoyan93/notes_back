@@ -3,6 +3,7 @@ import AuditService from "../services/AuditService";
 import BillingService, { BillingError } from "../services/BillingService";
 import DiscountService from "../services/DiscountService";
 import FamilyService, { FamilyError } from "../services/FamilyService";
+import PaymentService from "../services/PaymentService";
 import StripeService from "../services/StripeService";
 
 async function respond(res: Response, fallback: string, run: () => Promise<unknown>) {
@@ -70,6 +71,16 @@ export default class BillingController {
     await respond(res, "Could not remove that person", async () => {
       await FamilyService.remove(req.user.id, Number(req.params.id));
       return { ok: true };
+    });
+  };
+
+  /** Payment history: the caller's own, or a company they own (?companyId=). */
+  static payments = async (req: any, res: Response) => {
+    await respond(res, "Could not load payments", async () => {
+      const owner = req.query?.companyId
+        ? await StripeService.ownerFor(req.user.id, "team", req.query.companyId)
+        : { userId: req.user.id };
+      return PaymentService.forOwner(owner);
     });
   };
 

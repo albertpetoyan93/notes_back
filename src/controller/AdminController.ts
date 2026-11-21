@@ -11,6 +11,12 @@ import StaffService from "@src/services/admin/StaffService";
 import SupportActionService from "@src/services/admin/SupportActionService";
 import SupportRequestService from "@src/services/admin/SupportRequestService";
 import AdminService from "@src/services/AdminService";
+import PaymentService, {
+  paymentsCsv,
+  type GroupBy as PaymentGroupBy,
+  type PaymentFilter,
+  type PaymentStatus,
+} from "@src/services/PaymentService";
 import SignupSourceService, { GROUP_BY, GroupBy, SourceReport } from "@src/services/SignupSourceService";
 import type { StaffRole } from "@src/models/AdminStaff";
 import type { StaffRequest } from "@src/types";
@@ -119,7 +125,64 @@ function redactSources(report: SourceReport) {
   };
 }
 
+/** Filters shared by the payments report and its CSV export. */
+function paymentFilter(q: Record<string, unknown>): PaymentFilter {
+  const filter: PaymentFilter = {};
+  for (const key of ["from", "to"] as const) {
+    const value = oneString(q[key], key);
+    if (value === undefined || value === "") continue;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) throw fail(400, `${key} must be YYYY-MM-DD.`);
+    filter[key] = value;
+  }
+  if (filter.from && filter.to && filter.from > filter.to) throw fail(400, "from must be on or before to.");
+  const currency = oneString(q.currency, "currency");
+  if (currency) {
+    if (!/^[a-z]{3}$/.test(currency)) throw fail(400, "Invalid currency.");
+    filter.currency = currency;
+  }
+  const plan = oneString(q.plan, "plan");
+  if (plan) {
+    if (!["premium", "family", "team"].includes(plan)) throw fail(400, "Invalid plan.");
+    filter.plan = plan;
+  }
+  const status = oneString(q.status, "status");
+  if (status) {
+    if (!["paid", "refunded", "partially_refunded", "failed"].includes(status)) throw fail(400, "Invalid status.");
+    filter.status = status as PaymentStatus;
+  }
+  const userId = optionalInt(q.userId, "userId");
+  if (userId !== undefined) filter.userId = userId;
+  const companyId = optionalInt(q.companyId, "companyId");
+  if (companyId !== undefined) filter.companyId = companyId;
+  return filter;
+}
+
 export default class AdminController {
+  /** Payments: totals per currency, grouped by week, month or year, and one page of rows. */
+  static payments = async (req: StaffRequest, res: Response, next: NextFunction) => {
+    await run(res, next, async () => {
+      const groupBy = (oneString(req.query.groupBy, "groupBy") || "month") as PaymentGroupBy;
+      if (!["week", "month", "year"].includes(groupBy)) throw fail(400, "groupBy must be week, month or year.");
+      const page = optionalInt(req.query.page, "page") ?? 1;
+      const pageSize = Math.min(optionalInt(req.query.pageSize, "pageSize") ?? 50, 200);
+      return PaymentService.report(paymentFilter(req.query), groupBy, page, pageSize);
+    });
+  };
+
+  /** The same payments as a CSV file. */
+  static paymentsCsv = async (req: StaffRequest, res: Response, next: NextFunction) => {
+    try {
+      const rows = await PaymentService.exportRows(paymentFilter(req.query));
+      res.setHeader("Content-Type", "text/csv; charset=utf-8");
+      res.setHeader("Content-Disposition", `attachment; filename="2keevo-payments.csv"`);
+      res.status(200).send(paymentsCsv(rows));
+    } catch (e) {
+      await run(res, next, async () => {
+        throw e;
+      });
+    }
+  };
+
   static overview = async (req: StaffRequest, res: Response, next: NextFunction) => {
     await run(res, next, async () => redactOverview(await AdminService.overview(), req.staff!.role));
   };

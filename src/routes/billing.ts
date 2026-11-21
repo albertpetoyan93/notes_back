@@ -9,6 +9,7 @@ router.use(isAuth);
 // Plan, limits, trials, and payments with Stripe. (The Stripe webhook is mounted in
 // server.ts, before JSON parsing: its signature is checked against the raw body.)
 router.get("/", BillingController.summary as RequestHandler);
+router.get("/payments", BillingController.payments as RequestHandler);
 router.post("/trial", BillingController.startTrial as RequestHandler);
 router.post("/checkout", BillingController.checkout as RequestHandler);
 router.post("/portal", BillingController.portal as RequestHandler);

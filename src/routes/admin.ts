@@ -14,6 +14,18 @@ export const ADMIN_ROUTES: {
   { method: "get", path: "/overview", permission: "overview", handler: AdminController.overview as RequestHandler },
   {
     method: "get",
+    path: "/payments",
+    permission: "overview.revenue",
+    handler: AdminController.payments as RequestHandler,
+  },
+  {
+    method: "get",
+    path: "/payments.csv",
+    permission: "overview.revenue",
+    handler: AdminController.paymentsCsv as RequestHandler,
+  },
+  {
+    method: "get",
     path: "/analytics/daily",
     permission: "analytics.view",
     handler: AdminController.analyticsDaily as RequestHandler,

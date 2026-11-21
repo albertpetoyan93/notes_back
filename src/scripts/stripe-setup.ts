@@ -44,6 +44,7 @@ const WEBHOOK_EVENTS: Stripe.WebhookEndpointCreateParams.EnabledEvent[] = [
   "customer.subscription.resumed",
   "invoice.paid",
   "invoice.payment_failed",
+  "charge.refunded",
 ];
 
 async function main() {
@@ -143,7 +144,18 @@ async function main() {
   if (webhookArg) {
     const url = webhookArg.split("=").slice(1).join("=");
     const endpoints = await stripe.webhookEndpoints.list({ limit: 100 });
-    if (endpoints.data.some((endpoint) => endpoint.url === url)) {
+    const existing = endpoints.data.find((endpoint) => endpoint.url === url);
+    if (existing) {
+      // An endpoint made earlier (or by hand) gets any events added since.
+      const missing = WEBHOOK_EVENTS.filter(
+        (event) => !existing.enabled_events.includes("*") && !existing.enabled_events.includes(event)
+      );
+      if (missing.length) {
+        await stripe.webhookEndpoints.update(existing.id, {
+          enabled_events: [...(existing.enabled_events as typeof WEBHOOK_EVENTS), ...missing],
+        });
+        console.log(`+ webhook events: ${missing.join(", ")}`);
+      }
       console.log(`= webhook ${url} (its signing secret is in the Stripe dashboard)`);
     } else {
       const endpoint = await stripe.webhookEndpoints.create({ url, enabled_events: WEBHOOK_EVENTS, metadata: { app: "2keevo" } });

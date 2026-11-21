@@ -12,6 +12,16 @@ vi.mock("@src/middlwares/isStaff", () => ({
   },
 }));
 vi.mock("@src/services/AdminService", () => ({ default: { overview: vi.fn() } }));
+vi.mock("@src/services/PaymentService", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@src/services/PaymentService")>();
+  return {
+    ...actual,
+    default: {
+      report: vi.fn(async () => ({ totals: [], series: [], rows: [], total: 0, page: 1, pageSize: 50 })),
+      exportRows: vi.fn(async () => []),
+    },
+  };
+});
 vi.mock("@src/services/admin/AdminActionService", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@src/services/admin/AdminActionService")>();
   return { ...actual, default: { record: vi.fn(), recordView: vi.fn(), list: vi.fn() } };
@@ -80,6 +90,8 @@ import adminRouter, { ADMIN_ROUTES } from "./admin";
 
 const TABLE = [
   "get /overview overview",
+  "get /payments overview.revenue",
+  "get /payments.csv overview.revenue",
   "get /analytics/daily analytics.view",
   "get /analytics/funnel analytics.view",
   "get /analytics/retention analytics.view",

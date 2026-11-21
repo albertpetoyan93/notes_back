@@ -13,6 +13,7 @@ import { BillingError, publicSubscription } from "./BillingService";
 import CompanyBilling, { recipient } from "./CompanyBilling";
 import EmailService from "./EmailService";
 import EntitlementService, { isLive } from "./EntitlementService";
+import PaymentService from "./PaymentService";
 
 /**
  * Everything that talks to Stripe. Stripe charges, retries and keeps cards; 2keevo
@@ -481,14 +482,21 @@ class StripeService {
           failed = fresh.status !== "paid";
         }
         await this.syncSubscription(id, failed);
+        // The payment history: what was charged (or failed), for the user and the admin app.
+        if (invoice.id && (event.type === "invoice.paid" || failed)) {
+          await PaymentService.recordInvoice(invoice.id, failed);
+        }
         return;
       }
+      case "charge.refunded":
+        await PaymentService.recordRefund(event.data.object as Stripe.Charge);
+        return;
       default:
         return;
     }
   }
 
-  private invoiceSubscriptionId(invoice: any): string | null {
+  invoiceSubscriptionId(invoice: any): string | null {
     const direct = invoice.subscription;
     if (direct) return typeof direct === "string" ? direct : direct.id;
     const nested = invoice.parent?.subscription_details?.subscription;
@@ -580,7 +588,7 @@ class StripeService {
     return publicSubscription(local);
   }
 
-  private async ownerOfRemote(remote: Stripe.Subscription): Promise<Owner | null> {
+  async ownerOfRemote(remote: Stripe.Subscription): Promise<Owner | null> {
     const meta = remote.metadata || {};
     if (meta.userId && Number(meta.userId)) return { userId: Number(meta.userId) };
     if (meta.companyId && Number(meta.companyId)) return { companyId: Number(meta.companyId) };
