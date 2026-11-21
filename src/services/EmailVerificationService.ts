@@ -63,7 +63,10 @@ class EmailVerificationService {
       const origin = EnvVars.FrontendOrigin || "http://localhost:5173";
       logger.info(`Email confirmation link for ${user.email}: ${origin}/auth/confirm-email?token=${token}`);
     }
-    await EmailService.sendEmailConfirmation({ to: user.email, token }).catch((error) => logger.err(error, true));
+    // Sent in the background: a slow or unreachable mail server must never hold up
+    // sign-up, where the account already exists by now. A failure is logged, and
+    // "Send a new link" in the app tries again.
+    void EmailService.sendEmailConfirmation({ to: user.email, token }).catch((error) => logger.err(error, true));
   }
 
   /** The token decides which account is confirmed, not who is signed in. */

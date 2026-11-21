@@ -23,6 +23,11 @@ class EmailService {
       auth: EnvVars.Mail.User
         ? { user: EnvVars.Mail.User, pass: EnvVars.Mail.Password }
         : undefined,
+      // Nodemailer waits up to 2 minutes to connect and 10 for a reply by default;
+      // a stuck mail server should fail fast instead of holding a request open.
+      connectionTimeout: 10_000,
+      greetingTimeout: 10_000,
+      socketTimeout: 30_000,
     });
   }
 

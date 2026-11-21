@@ -59,6 +59,16 @@ afterEach(() => {
 });
 
 describe("issue + confirm", () => {
+  it("doesn't wait for the email: a mail server that never answers can't hold up sign-up", async () => {
+    vi.spyOn(EmailService, "sendEmailConfirmation").mockReturnValue(new Promise(() => {}) as never);
+    const done = await Promise.race([
+      EmailVerificationService.issue((await User.findByPk(1)) as never).then(() => "issued"),
+      new Promise((resolve) => setTimeout(() => resolve("waited"), 1000)),
+    ]);
+    expect(done).toBe("issued");
+    expect(EmailService.sendEmailConfirmation).toHaveBeenCalled();
+  });
+
   it("emails a single-use link and stores only its hash", async () => {
     const send = vi.spyOn(EmailService, "sendEmailConfirmation").mockResolvedValue(true as never);
     await EmailVerificationService.issue((await User.findByPk(1)) as never);
