@@ -23,6 +23,8 @@ interface SubscriptionAttributes {
   renewalReminderSentAt?: Date | null;
   /** The payment-failed email for the current grace period. */
   paymentFailedEmailedAt?: Date | null;
+  /** Billing currency of a paid subscription ("usd" or "eur"), from Stripe. */
+  currency?: string | null;
   stripeCustomerId?: string | null;
   stripeSubscriptionId?: string | null;
   createdAt?: Date;
@@ -43,6 +45,7 @@ type SubscriptionCreation = Optional<
   | "graceEndsAt"
   | "renewalReminderSentAt"
   | "paymentFailedEmailedAt"
+  | "currency"
   | "stripeCustomerId"
   | "stripeSubscriptionId"
   | "createdAt"
@@ -67,6 +70,7 @@ class Subscription
   public graceEndsAt?: Date | null;
   public renewalReminderSentAt?: Date | null;
   public paymentFailedEmailedAt?: Date | null;
+  public currency?: string | null;
   public stripeCustomerId?: string | null;
   public stripeSubscriptionId?: string | null;
   public readonly createdAt!: Date;
@@ -89,6 +93,7 @@ Subscription.init(
     graceEndsAt: { type: DataTypes.DATE, allowNull: true },
     renewalReminderSentAt: { type: DataTypes.DATE, allowNull: true },
     paymentFailedEmailedAt: { type: DataTypes.DATE, allowNull: true },
+    currency: { type: DataTypes.STRING(3), allowNull: true },
     stripeCustomerId: { type: DataTypes.STRING(255), allowNull: true },
     stripeSubscriptionId: { type: DataTypes.STRING(255), allowNull: true, unique: true },
   },

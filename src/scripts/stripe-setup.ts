@@ -68,21 +68,33 @@ async function main() {
     }
     for (const interval of ["month", "year"] as Interval[]) {
       const lookup = lookupKey(item.plan, interval);
-      const existing = await stripe.prices.list({ lookup_keys: [lookup], limit: 1 });
-      if (existing.data[0]) {
-        console.log(`= price ${lookup} (${existing.data[0].id})`);
+      const amount = item.prices[interval];
+      // EUR: the same number, VAT included (French and EU consumer prices are shown with VAT).
+      const eur = { unit_amount: amount, tax_behavior: "inclusive" as const };
+      const [existing] = (
+        await stripe.prices.list({ lookup_keys: [lookup], limit: 1, expand: ["data.currency_options"] })
+      ).data;
+      if (existing) {
+        if (existing.currency_options?.eur) {
+          console.log(`= price ${lookup} (${existing.id}, USD + EUR)`);
+        } else {
+          await stripe.prices.update(existing.id, { currency_options: { eur } });
+          console.log(`+ EUR on price ${lookup}: €${(amount / 100).toFixed(2)} incl. VAT (${existing.id})`);
+        }
         continue;
       }
       const price = await stripe.prices.create({
         product: product.id,
+        // USD: tax added on top where it applies.
         currency: "usd",
-        unit_amount: item.prices[interval],
+        unit_amount: amount,
+        tax_behavior: "exclusive",
+        currency_options: { eur },
         recurring: { interval },
         lookup_key: lookup,
-        tax_behavior: "exclusive",
         metadata: { app: "2keevo", lookup_key: lookup },
       });
-      console.log(`+ price ${lookup}: $${(item.prices[interval] / 100).toFixed(2)}/${interval} (${price.id})`);
+      console.log(`+ price ${lookup}: $${(amount / 100).toFixed(2)} / €${(amount / 100).toFixed(2)} per ${interval} (${price.id})`);
     }
   }
 

@@ -44,6 +44,8 @@ export function publicSubscription(subscription: Subscription | null) {
     currentPeriodEnd: subscription.currentPeriodEnd ?? null,
     cancelAtPeriodEnd: subscription.cancelAtPeriodEnd,
     graceEndsAt: subscription.graceEndsAt ?? null,
+    /** "usd" or "eur" once paid through Stripe; null for a trial. */
+    currency: subscription.currency ?? null,
     live: isLive(subscription),
     /** Paid through Stripe (not a free trial): manage it in Stripe's portal. */
     paid: Boolean(subscription.stripeSubscriptionId),

@@ -34,6 +34,10 @@ const discountCoupon = () => process.env.STRIPE_COUPON_DISCOUNT || DISCOUNT_COUP
 /** Prices are found by lookup key (`premium_year`, …), set by `npm run stripe:setup`. */
 export const lookupKey = (plan: PlanId, interval: Interval) => `${plan}_${interval}`;
 
+/** Each price is the same number in USD (tax on top) and EUR (VAT included). */
+export const CURRENCIES = ["usd", "eur"] as const;
+export type Currency = (typeof CURRENCIES)[number];
+
 /** A subscription on a price that isn't one of 2keevo's plans (something else sold from the same Stripe account). */
 export class ForeignSubscriptionError extends Error {
   constructor(subscriptionId: string) {
@@ -121,8 +125,23 @@ class StripeService {
   }
 
   async customerFor(owner: Owner) {
+    const [table, id] = "userId" in owner ? ["users", owner.userId] : ["companies", owner.companyId];
     const existing = await this.storedCustomer(owner);
-    if (existing) return existing;
+    if (existing) {
+      // A customer from another Stripe account or mode (sandbox ids after going live), or a
+      // deleted one, can't be charged here: forget it and make a new one.
+      const usable = await this.client()
+        .customers.retrieve(existing)
+        .then((customer) => !(customer as Stripe.DeletedCustomer).deleted)
+        .catch((error: any) => {
+          if (error?.code === "resource_missing") return false;
+          throw error;
+        });
+      if (usable) return existing;
+      await sequelize.query(`UPDATE "${table}" SET "stripeCustomerId" = NULL WHERE id = :id AND "stripeCustomerId" = :old`, {
+        replacements: { id, old: existing },
+      });
+    }
 
     let details: Stripe.CustomerCreateParams;
     if ("userId" in owner) {
@@ -143,10 +162,9 @@ class StripeService {
     }
 
     const customer = await this.client().customers.create(details, {
-      // Two clicks at once must not make two customers.
-      idempotencyKey: `customer-${"userId" in owner ? `user-${owner.userId}` : `company-${owner.companyId}`}`,
+      // Two clicks at once must not make two customers. A replacement gets its own key.
+      idempotencyKey: `customer-${table === "users" ? "user" : "company"}-${id}${existing ? `-after-${existing}` : ""}`,
     });
-    const [table, id] = "userId" in owner ? ["users", owner.userId] : ["companies", owner.companyId];
     await sequelize.query(`UPDATE "${table}" SET "stripeCustomerId" = :customer WHERE id = :id AND "stripeCustomerId" IS NULL`, {
       replacements: { customer: customer.id, id },
     });
@@ -222,7 +240,7 @@ class StripeService {
   /* Checkout and the customer portal ------------------------------------------------ */
 
   /** A Stripe Checkout page for a paid plan. Returns the URL to send the person to. */
-  async checkout(userId: number, input: { plan: unknown; interval: unknown; companyId?: unknown }) {
+  async checkout(userId: number, input: { plan: unknown; interval: unknown; companyId?: unknown; currency?: unknown }) {
     const plan = input.plan as PlanId;
     const interval = input.interval as Interval;
     if (plan !== "premium" && plan !== "family" && plan !== "team") {
@@ -259,19 +277,38 @@ class StripeService {
       "companyId" in owner && (await Company.findByPk(owner.companyId, { attributes: ["discount"] }))?.discount;
 
     const tax = process.env.STRIPE_AUTOMATIC_TAX === "true";
+    const site = (process.env.WEBSITE_URL || "https://2keevo.com").replace(/\/$/, "");
     const session = await this.client().checkout.sessions.create({
       mode: "subscription",
       customer: await this.customerFor(owner),
       client_reference_id: "userId" in owner ? `user-${owner.userId}` : `company-${owner.companyId}`,
       line_items: [{ price: await this.priceId(plan, interval), quantity }],
+      currency: await this.checkoutCurrency(owner, input.currency),
       subscription_data: { metadata, ...(trialEnd ? { trial_end: trialEnd } : {}) },
       metadata,
       ...(discounted ? { discounts: [{ coupon: discountCoupon() }] } : { allow_promotion_codes: true }),
+      // EU consumers: the plan starts now, so they agree to give up the 14-day withdrawal right.
+      // Stripe needs a Terms of Service URL in the account's public details for this. Only a
+      // sandbox whose live account isn't activated yet (no public details) turns it off.
+      ...(process.env.STRIPE_TERMS_CONSENT === "false"
+        ? {}
+        : {
+            consent_collection: { terms_of_service: "required" as const },
+            custom_text: {
+              terms_of_service_acceptance: {
+                message:
+                  `I agree to the [Terms of Service](${site}/terms) and the [Subscription policy](${site}/subscription-policy), ` +
+                  "and I ask for my plan to start now. I understand that I lose my 14-day right of withdrawal once it starts.",
+              },
+            },
+          }),
       ...(tax
         ? {
             automatic_tax: { enabled: true },
             billing_address_collection: "required" as const,
             customer_update: { address: "auto" as const, name: "auto" as const },
+            // Businesses enter their VAT number (EU reverse charge).
+            tax_id_collection: { enabled: true },
           }
         : {}),
       success_url: `${appUrl()}/settings/billing?checkout=success`,
@@ -279,6 +316,20 @@ class StripeService {
     });
     if (!session.url) throw new BillingError("Stripe didn't return a checkout page.", 502);
     return { url: session.url };
+  }
+
+  /**
+   * The checkout currency: the one this person or company already pays in (a Stripe
+   * customer stays in one currency), else the one their screen showed, else USD.
+   */
+  async checkoutCurrency(owner: Owner, requested: unknown): Promise<Currency> {
+    const earlier = await Subscription.findOne({
+      where: { ...ownerWhere(owner), currency: { [Op.in]: [...CURRENCIES] } },
+      order: [["updatedAt", "DESC"]],
+      attributes: ["currency"],
+    });
+    if (earlier?.currency) return earlier.currency as Currency;
+    return CURRENCIES.includes(requested as Currency) ? (requested as Currency) : "usd";
   }
 
   /** Stripe's customer portal: card, invoices, billing details. */
@@ -458,7 +509,12 @@ class StripeService {
     if (!owner) throw new Error(`Subscription ${remote.id} has no 2keevo owner.`);
 
     const status = mapStatus(remote.status);
-    const periodEnd = (item as any)?.current_period_end ?? (remote as any).current_period_end ?? null;
+    let periodEnd: number | null = (item as any)?.current_period_end ?? (remote as any).current_period_end ?? null;
+    // Cancelled straight away (by Stripe after failed retries, or by hand) ends access then,
+    // not at the end of a period nobody paid for. At-period-end cancellations end there anyway.
+    if (remote.status === "canceled" && remote.ended_at && (!periodEnd || remote.ended_at < periodEnd)) {
+      periodEnd = remote.ended_at;
+    }
     const local =
       (await Subscription.findOne({ where: { stripeSubscriptionId: remote.id } })) ||
       Subscription.build({ ...owner, plan: planned.plan, status, stripeSubscriptionId: remote.id });
@@ -483,6 +539,7 @@ class StripeService {
       // A deferred first charge (subscribed during a trial): shown as "first payment on".
       trialEndsAt: remote.status === "trialing" && remote.trial_end ? new Date(remote.trial_end * 1000) : null,
       graceEndsAt,
+      currency: remote.currency || null,
       stripeCustomerId: typeof remote.customer === "string" ? remote.customer : remote.customer.id,
     });
     await local.save();
