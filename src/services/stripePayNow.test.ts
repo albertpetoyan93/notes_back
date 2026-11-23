@@ -134,7 +134,7 @@ describe("try a failed payment again", () => {
   });
 
   it("shows the amount and the card before charging", async () => {
-    await expect(StripeService.previewRetry(5, {})).resolves.toEqual({
+    await expect(StripeService.previewRetry(5, {})).resolves.toMatchObject({
       amountCents: 2950,
       currency: "usd",
       card: { brand: "mastercard", last4: "3081", wallet: null },
@@ -159,5 +159,23 @@ describe("try a failed payment again", () => {
   it("nothing to retry when the last invoice is paid", async () => {
     fake.subscriptions.retrieve.mockResolvedValue({ ...remote, latest_invoice: { ...open, status: "paid" } });
     await expect(StripeService.previewRetry(5, {})).rejects.toMatchObject({ status: 409 });
+  });
+});
+
+describe("invoice breakdown for the confirm dialog", () => {
+  it("splits the new plan, the credit for unused time and the discount", async () => {
+    const { invoiceBreakdown } = await import("./StripeService");
+    const result = invoiceBreakdown({
+      lines: {
+        data: [
+          { amount: -349, period: { start: 1795000000, end: 1797600000 } },
+          { amount: 3000, period: { start: 1795000000, end: 1826500000 } },
+        ],
+      },
+      total_discount_amounts: [{ amount: 299 }],
+      total_taxes: [],
+    } as any);
+    expect(result).toMatchObject({ priceCents: 3000, creditCents: 349, discountCents: 299, taxCents: 0 });
+    expect(result.periodEnd?.getTime()).toBe(1826500000 * 1000);
   });
 });

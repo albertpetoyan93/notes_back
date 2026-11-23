@@ -57,6 +57,25 @@ export function chargedCard(remote: Stripe.Subscription) {
   };
 }
 
+/**
+ * A receipt-style breakdown of an invoice for the confirm dialog: the new plan's price and
+ * period (the line reaching furthest), the credit for unused time (negative lines), any
+ * discount and tax. Amounts in cents.
+ */
+export function invoiceBreakdown(invoice: Stripe.Invoice) {
+  const lines = invoice.lines?.data || [];
+  const plan = [...lines].filter((line) => line.amount > 0).sort((a, b) => (b.period?.end || 0) - (a.period?.end || 0))[0];
+  const sum = (list?: { amount: number }[] | null) => (list || []).reduce((total, entry) => total + (entry.amount || 0), 0);
+  return {
+    priceCents: plan?.amount ?? 0,
+    creditCents: -lines.filter((line) => line.amount < 0).reduce((total, line) => total + line.amount, 0),
+    discountCents: sum(invoice.total_discount_amounts as { amount: number }[] | null),
+    taxCents: sum((invoice as any).total_taxes),
+    periodStart: plan?.period?.start ? new Date(plan.period.start * 1000) : null,
+    periodEnd: plan?.period?.end ? new Date(plan.period.end * 1000) : null,
+  };
+}
+
 export class ForeignSubscriptionError extends Error {
   constructor(subscriptionId: string) {
     super(`Subscription ${subscriptionId} has a price 2keevo doesn't know.`);
@@ -452,7 +471,13 @@ class StripeService {
   /** What "Try again" charges, shown before the person confirms. */
   async previewRetry(userId: number, input: { companyId?: unknown }) {
     const { remote, invoice } = await this.unpaidInvoice(userId, input.companyId);
-    return { amountCents: invoice.amount_due, currency: invoice.currency, card: chargedCard(remote) };
+    return {
+      amountCents: invoice.amount_due,
+      currency: invoice.currency,
+      card: chargedCard(remote),
+      interval: remote.items?.data[0]?.price?.recurring?.interval === "year" ? "year" : "month",
+      ...invoiceBreakdown(invoice),
+    };
   }
 
   /**
@@ -506,6 +531,7 @@ class StripeService {
       prorationDate,
       // Still in the free days: nothing today, the first charge stays at the trial's end.
       trialEndsAt: remote.status === "trialing" && remote.trial_end ? new Date(remote.trial_end * 1000) : null,
+      ...invoiceBreakdown(invoice),
     };
   }
 
