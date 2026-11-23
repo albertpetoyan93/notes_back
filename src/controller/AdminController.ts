@@ -18,6 +18,7 @@ import PaymentService, {
   type PaymentStatus,
 } from "@src/services/PaymentService";
 import SignupSourceService, { GROUP_BY, GroupBy, SourceReport } from "@src/services/SignupSourceService";
+import TrafficService, { TrafficReport } from "@src/services/TrafficService";
 import type { StaffRole } from "@src/models/AdminStaff";
 import type { StaffRequest } from "@src/types";
 
@@ -123,6 +124,29 @@ function redactSources(report: SourceReport) {
     totals: counts(report.totals),
     untagged: smallCount(report.untagged),
   };
+}
+
+/** Marketing sees sign-up counts under 5 as "<5" (visitor counts are not about accounts). */
+function redactTraffic(report: TrafficReport) {
+  const rows = (list: TrafficReport["campaigns"]) => list.map((r) => ({ ...r, signups: smallCount(r.signups) }));
+  return {
+    ...report,
+    totals: { ...report.totals, signups: smallCount(report.totals.signups) },
+    campaigns: rows(report.campaigns),
+    contents: rows(report.contents),
+  };
+}
+
+/** A from/to pair of UTC dates from the query, defaulting to today. */
+function dateRange(query: StaffRequest["query"]): { from: string; to: string } {
+  const today = utcDate(new Date());
+  const from = oneString(query.from, "from") || today;
+  const to = oneString(query.to, "to") || today;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to)) {
+    throw fail(400, "from and to must be YYYY-MM-DD.");
+  }
+  if (from > to) throw fail(400, "from must be on or before to.");
+  return { from, to };
 }
 
 /** Filters shared by the payments report and its CSV export. */
@@ -242,6 +266,14 @@ export default class AdminController {
       }
       const report = await SignupSourceService.bySource(from, to, groupBy as GroupBy);
       return req.staff!.role === "marketing" ? redactSources(report) : report;
+    });
+  };
+
+  static marketingTraffic = async (req: StaffRequest, res: Response, next: NextFunction) => {
+    await run(res, next, async () => {
+      const { from, to } = dateRange(req.query);
+      const report = await TrafficService.report(from, to);
+      return req.staff!.role === "marketing" ? redactTraffic(report) : report;
     });
   };
 

@@ -10,6 +10,7 @@ import admin from "./admin";
 import emergency from "./emergency";
 import attachments from "./attachments";
 import files from "./files";
+import pv from "./pv";
 
 const router = Router();
 
@@ -24,5 +25,6 @@ router.use("/admin", admin);
 router.use("/emergency", emergency);
 router.use("/attachments", attachments);
 router.use("/files", files);
+router.use("/pv", pv);
 
 export default router;

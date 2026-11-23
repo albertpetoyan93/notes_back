@@ -65,6 +65,10 @@ vi.mock("@src/services/SignupSourceService", async (importOriginal) => {
   const actual: any = await importOriginal();
   return { ...actual, default: { bySource: vi.fn() } };
 });
+vi.mock("@src/services/TrafficService", async (importOriginal) => {
+  const actual: any = await importOriginal();
+  return { ...actual, default: { report: vi.fn() } };
+});
 vi.mock("@src/services/admin/AnalyticsService", () => ({
   default: {
     daily: vi.fn(),
@@ -86,6 +90,7 @@ import SupportRequestService from "@src/services/admin/SupportRequestService";
 import AdminBillingService from "@src/services/admin/AdminBillingService";
 import AnalyticsService from "@src/services/admin/AnalyticsService";
 import SignupSourceService from "@src/services/SignupSourceService";
+import TrafficService from "@src/services/TrafficService";
 import adminRouter, { ADMIN_ROUTES } from "./admin";
 
 const TABLE = [
@@ -97,6 +102,7 @@ const TABLE = [
   "get /analytics/retention analytics.view",
   "get /analytics/extension-versions analytics.view",
   "get /marketing/signups marketing.view",
+  "get /marketing/traffic marketing.view",
   "get /users users.view",
   "get /users/:id users.view",
   "post /users/:id/password-reset support.actions",
@@ -194,6 +200,7 @@ const m = {
   billing: vi.mocked(AdminBillingService),
   analytics: vi.mocked(AnalyticsService),
   sources: vi.mocked(SignupSourceService),
+  traffic: vi.mocked(TrafficService),
 };
 
 beforeEach(() => {
@@ -209,6 +216,17 @@ beforeEach(() => {
     rows: [{ key: "instagram", signups: 12, activated: 3, paying: 0 }, { key: null, signups: 2, activated: 0, paying: 0 }],
     totals: { signups: 14, activated: 3, paying: 0 },
     untagged: 2,
+  });
+  m.traffic.report.mockResolvedValue({
+    totals: { visitors: 120, pageviews: 300, signups: 3 },
+    daily: [],
+    pages: [],
+    sources: [],
+    countries: [],
+    devices: [],
+    browsers: [],
+    campaigns: [{ key: "ads-test-1", visitors: 80, signups: 3 }],
+    contents: [{ key: "a1-share", visitors: 30, signups: 12 }],
   });
   m.actions.list.mockResolvedValue({ rows: [], total: 0 });
   m.users.list.mockResolvedValue({ rows: [], total: 0 });
@@ -562,5 +580,28 @@ describe("marketing sign-ups by source", () => {
     expect((await as("admin", "get", "/marketing/signups?groupBy=email")).status).toBe(400);
     expect((await as("admin", "get", "/marketing/signups?from=yesterday")).status).toBe(400);
     expect(m.sources.bySource).not.toHaveBeenCalled();
+  });
+});
+
+describe("marketing website traffic", () => {
+  it("passes the period to the service and returns plain numbers to admins", async () => {
+    const res = await as("admin", "get", "/marketing/traffic?from=2026-11-01&to=2026-11-30");
+    expect(res.status).toBe(200);
+    expect(m.traffic.report).toHaveBeenCalledWith("2026-11-01", "2026-11-30");
+    expect(res.body.totals).toEqual({ visitors: 120, pageviews: 300, signups: 3 });
+  });
+
+  it("shows marketing small sign-up counts as <5 but keeps visitor counts", async () => {
+    const res = await as("marketing", "get", "/marketing/traffic?from=2026-11-01&to=2026-11-30");
+    expect(res.status).toBe(200);
+    expect(res.body.totals).toEqual({ visitors: 120, pageviews: 300, signups: "<5" });
+    expect(res.body.campaigns[0]).toEqual({ key: "ads-test-1", visitors: 80, signups: "<5" });
+    expect(res.body.contents[0]).toEqual({ key: "a1-share", visitors: 30, signups: 12 });
+  });
+
+  it("refuses support and 400s a bad date", async () => {
+    expect((await as("support", "get", "/marketing/traffic")).status).toBe(403);
+    expect((await as("admin", "get", "/marketing/traffic?from=2026-12-01&to=2026-11-01")).status).toBe(400);
+    expect(m.traffic.report).not.toHaveBeenCalled();
   });
 });

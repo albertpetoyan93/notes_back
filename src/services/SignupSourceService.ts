@@ -34,14 +34,14 @@ export interface SourceReport {
 const OWN_DOMAIN = /(^|\.)2keevo\.com$/;
 const DOMAIN = /^[a-z0-9-]+(\.[a-z0-9-]+)+$/;
 
-function text(value: unknown, max: number): string | null {
+export function text(value: unknown, max: number): string | null {
   if (typeof value !== "string") return null;
   // eslint-disable-next-line no-control-regex
   const cleaned = value.replace(/[\u0000-\u001f\u007f]/g, "").trim().toLowerCase().slice(0, max).trim();
   return cleaned || null;
 }
 
-function domainOf(referrer: unknown, referrerDomain: unknown): string | null {
+export function domainOf(referrer: unknown, referrerDomain: unknown): string | null {
   let host: string | null = null;
   if (typeof referrer === "string" && referrer.includes("://")) {
     try {

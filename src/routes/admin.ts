@@ -54,6 +54,12 @@ export const ADMIN_ROUTES: {
     permission: "marketing.view",
     handler: AdminController.marketingSignups as RequestHandler,
   },
+  {
+    method: "get",
+    path: "/marketing/traffic",
+    permission: "marketing.view",
+    handler: AdminController.marketingTraffic as RequestHandler,
+  },
   { method: "get", path: "/users", permission: "users.view", handler: AdminController.listUsers as RequestHandler },
   { method: "get", path: "/users/:id", permission: "users.view", handler: AdminController.getUser as RequestHandler },
   {
