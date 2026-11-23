@@ -174,7 +174,7 @@ User.init(
     extensionAutoLockMinutes: {
       type: DataTypes.INTEGER,
       allowNull: false,
-      defaultValue: 60,
+      defaultValue: 360,
     },
     e2eEnabled: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
     e2eSince: { type: DataTypes.DATE, allowNull: true },

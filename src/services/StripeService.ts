@@ -40,6 +40,23 @@ export const CURRENCIES = ["usd", "eur"] as const;
 export type Currency = (typeof CURRENCIES)[number];
 
 /** A subscription on a price that isn't one of 2keevo's plans (something else sold from the same Stripe account). */
+/**
+ * The card a subscription's next invoice is charged to: its own default payment method,
+ * else the customer's. Needs both expanded. Only the brand and last 4 digits, or a wallet.
+ */
+export function chargedCard(remote: Stripe.Subscription) {
+  const customer = typeof remote.customer === "object" && !("deleted" in remote.customer) ? remote.customer : null;
+  const method = [remote.default_payment_method, customer?.invoice_settings?.default_payment_method].find(
+    (value): value is Stripe.PaymentMethod => !!value && typeof value === "object"
+  );
+  if (!method?.card) return null;
+  return {
+    brand: method.card.brand,
+    last4: method.card.last4,
+    wallet: method.card.wallet?.type ?? null,
+  };
+}
+
 export class ForeignSubscriptionError extends Error {
   constructor(subscriptionId: string) {
     super(`Subscription ${subscriptionId} has a price 2keevo doesn't know.`);
@@ -48,6 +65,9 @@ export class ForeignSubscriptionError extends Error {
 }
 
 const appUrl = () => (EnvVars.FrontendOrigin || "http://localhost:5173").replace(/\/$/, "");
+
+/** The Billing page's ?for= value: "me" for a person, the company id for a Team. */
+const billingFor = (owner: Owner) => ("companyId" in owner ? String(owner.companyId) : "me");
 
 function ownerWhere(owner: Owner) {
   return "userId" in owner ? { userId: owner.userId } : { companyId: owner.companyId };
@@ -316,8 +336,9 @@ class StripeService {
             tax_id_collection: { enabled: true },
           }
         : {}),
-      success_url: `${appUrl()}/settings/billing?checkout=success`,
-      cancel_url: `${appUrl()}/settings/billing?checkout=cancel`,
+      // Back on the Billing view of whoever paid: Personal, or this company.
+      success_url: `${appUrl()}/settings/billing?checkout=success&for=${billingFor(owner)}`,
+      cancel_url: `${appUrl()}/settings/billing?checkout=cancel&for=${billingFor(owner)}`,
     });
     if (!session.url) throw new BillingError("Stripe didn't return a checkout page.", 502);
     return { url: session.url };
@@ -349,7 +370,7 @@ class StripeService {
     const configuration = configs.data.find((config) => config.metadata?.app === "2keevo")?.id;
     const session = await this.client().billingPortal.sessions.create({
       customer,
-      return_url: `${appUrl()}/settings/billing`,
+      return_url: `${appUrl()}/settings/billing?for=${billingFor(owner)}`,
       ...(configuration ? { configuration } : {}),
     });
     return { url: session.url };
@@ -375,21 +396,168 @@ class StripeService {
     return this.syncSubscription(subscription.stripeSubscriptionId as string);
   }
 
-  /** Monthly ↔ yearly. Charged now for the difference; unused time is credited. */
-  async changeInterval(userId: number, input: { companyId?: unknown; interval: unknown }) {
+  /**
+   * Subscribed during a trial, so the first charge waits for the trial's end: end the
+   * trial now and charge the saved card today. If the card can't be charged, nothing
+   * changes (the trial keeps going) and the person sees the card's error.
+   */
+  async payNow(userId: number, input: { companyId?: unknown }) {
+    const subscription = await this.paidOrFail(userId, input.companyId);
+    const id = subscription.stripeSubscriptionId as string;
+    const remote = await this.client().subscriptions.retrieve(id);
+    if (remote.status !== "trialing") throw new BillingError("This plan is already paid.", 409);
+
+    try {
+      await this.client().subscriptions.update(id, {
+        trial_end: "now",
+        proration_behavior: "none",
+        payment_behavior: "error_if_incomplete",
+      });
+    } catch (error: any) {
+      if (error?.type === "StripeCardError" || error?.code === "subscription_payment_intent_requires_action") {
+        throw new BillingError(
+          error?.code === "subscription_payment_intent_requires_action"
+            ? "Your bank wants to confirm this payment. Use Manage to update your card, or wait: the plan is charged when the free days end."
+            : `${error.message || "The card was declined."} Nothing was charged; your free days continue.`,
+          402
+        );
+      }
+      throw error;
+    }
+
+    const synced = await this.syncSubscription(id);
+    // The webhook records it too; doing it here shows it in the history right away.
+    const latest = (await this.client().subscriptions.retrieve(id)).latest_invoice;
+    const invoiceId = typeof latest === "string" ? latest : latest?.id;
+    if (invoiceId) await PaymentService.recordInvoice(invoiceId, false).catch((error) => logger.err(error));
+    return synced;
+  }
+
+  /** The subscription's unpaid invoice (a failed renewal or switch), with the card it goes on. */
+  private async unpaidInvoice(userId: number, companyId?: unknown) {
+    // Not only while live: paying also brings back a plan whose grace period has run out.
+    const owner = companyId ? await this.ownerFor(userId, "team", companyId) : ({ userId } as Owner);
+    const subscription = await this.stripeSubscription(owner);
+    if (!subscription?.stripeSubscriptionId) throw new BillingError("There's no paid plan to pay for.", 404);
+    const remote = await this.client().subscriptions.retrieve(subscription.stripeSubscriptionId, {
+      expand: ["latest_invoice", "default_payment_method", "customer.invoice_settings.default_payment_method"],
+    });
+    const invoice = remote.latest_invoice;
+    if (!invoice || typeof invoice !== "object" || invoice.status !== "open" || !invoice.amount_due) {
+      throw new BillingError("There's no unpaid payment to try again.", 409);
+    }
+    return { remote, invoice };
+  }
+
+  /** What "Try again" charges, shown before the person confirms. */
+  async previewRetry(userId: number, input: { companyId?: unknown }) {
+    const { remote, invoice } = await this.unpaidInvoice(userId, input.companyId);
+    return { amountCents: invoice.amount_due, currency: invoice.currency, card: chargedCard(remote) };
+  }
+
+  /**
+   * Charge the unpaid invoice again now, on the card on file (update it first if needed).
+   * A decline leaves everything as it was and says why.
+   */
+  async retryPayment(userId: number, input: { companyId?: unknown }) {
+    const { remote, invoice } = await this.unpaidInvoice(userId, input.companyId);
+    try {
+      await this.client().invoices.pay(invoice.id as string, { off_session: true });
+    } catch (error: any) {
+      if (error?.code === "invoice_payment_intent_requires_action") {
+        throw new BillingError("Your bank wants to confirm this payment. Use Update card and pay it there.", 402);
+      }
+      if (error?.type === "StripeCardError") {
+        throw new BillingError(`${error.message || "The card was declined."} Nothing was charged. Update your card and try again.`, 402);
+      }
+      throw error;
+    }
+    await PaymentService.recordInvoice(invoice.id as string, false).catch((error) => logger.err(error));
+    return this.syncSubscription(remote.id);
+  }
+
+  /**
+   * What switching monthly ↔ yearly charges today, before the person confirms: Stripe's
+   * own preview of the invoice (new price, less the unused part of the current period,
+   * less any discount). The same proration moment is then used for the real change.
+   */
+  async previewInterval(userId: number, input: { companyId?: unknown; interval: unknown }) {
+    const interval = input.interval as Interval;
+    if (interval !== "month" && interval !== "year") throw new BillingError("Choose monthly or yearly.");
+    const subscription = await this.paidOrFail(userId, input.companyId);
+    const remote = await this.client().subscriptions.retrieve(subscription.stripeSubscriptionId as string, {
+      expand: ["default_payment_method", "customer.invoice_settings.default_payment_method"],
+    });
+    const item = remote.items.data[0];
+    const prorationDate = Math.floor(Date.now() / 1000);
+    const invoice = await this.client().invoices.createPreview({
+      customer: typeof remote.customer === "string" ? remote.customer : remote.customer.id,
+      subscription: remote.id,
+      subscription_details: {
+        items: [{ id: item.id, price: await this.priceId(subscription.plan, interval), quantity: item.quantity }],
+        proration_behavior: "always_invoice",
+        proration_date: prorationDate,
+      },
+    });
+    return {
+      amountCents: invoice.amount_due,
+      currency: invoice.currency,
+      card: chargedCard(remote),
+      prorationDate,
+      // Still in the free days: nothing today, the first charge stays at the trial's end.
+      trialEndsAt: remote.status === "trialing" && remote.trial_end ? new Date(remote.trial_end * 1000) : null,
+    };
+  }
+
+  /**
+   * Monthly ↔ yearly. Charged now for the difference; unused time is credited. Only if
+   * that payment goes through: otherwise Stripe keeps the plan as it was (still paid, no
+   * unpaid invoice) and the person is told why.
+   */
+  async changeInterval(userId: number, input: { companyId?: unknown; interval: unknown; prorationDate?: unknown }) {
     const interval = input.interval as Interval;
     if (interval !== "month" && interval !== "year") throw new BillingError("Choose monthly or yearly.");
     const subscription = await this.paidOrFail(userId, input.companyId);
     if (subscription.interval === interval) return publicSubscription(subscription);
 
+    // The moment the confirmed preview was priced at, so the charge matches what was shown.
+    const now = Math.floor(Date.now() / 1000);
+    const asked = Number(input.prorationDate);
+    const prorationDate = Number.isInteger(asked) && asked <= now && now - asked < 3600 ? asked : undefined;
+
     const remote = await this.client().subscriptions.retrieve(subscription.stripeSubscriptionId as string);
     const item = remote.items.data[0];
-    await this.client().subscriptions.update(remote.id, {
-      items: [{ id: item.id, price: await this.priceId(subscription.plan, interval), quantity: item.quantity }],
-      proration_behavior: "always_invoice",
-      cancel_at_period_end: false,
-    });
-    return this.syncSubscription(remote.id);
+    const was = remote.items.data[0]?.price?.recurring?.interval === "year" ? "yearly" : "monthly";
+    try {
+      await this.client().subscriptions.update(remote.id, {
+        items: [{ id: item.id, price: await this.priceId(subscription.plan, interval), quantity: item.quantity }],
+        proration_behavior: "always_invoice",
+        payment_behavior: "error_if_incomplete",
+        ...(prorationDate ? { proration_date: prorationDate } : {}),
+        cancel_at_period_end: false,
+      });
+    } catch (error: any) {
+      if (error?.code === "subscription_payment_intent_requires_action") {
+        throw new BillingError(
+          `Your bank wants to confirm this payment, so nothing changed: you're still on ${was}. Add another card under Card and invoices, then switch again.`,
+          402
+        );
+      }
+      if (error?.type === "StripeCardError") {
+        throw new BillingError(
+          `${error.message || "The card was declined."} Nothing was charged and nothing changed: you're still on ${was}.`,
+          402
+        );
+      }
+      throw error;
+    }
+
+    const synced = await this.syncSubscription(remote.id);
+    // The webhook records it too; doing it here shows it in the history right away.
+    const latest = (await this.client().subscriptions.retrieve(remote.id)).latest_invoice;
+    const invoiceId = typeof latest === "string" ? latest : latest?.id;
+    if (invoiceId) await PaymentService.recordInvoice(invoiceId, false).catch((error) => logger.err(error));
+    return synced;
   }
 
   /**
@@ -491,6 +659,14 @@ class StripeService {
       case "charge.refunded":
         await PaymentService.recordRefund(event.data.object as Stripe.Charge);
         return;
+      case "invoice.voided": {
+        // Cancelled before it was paid (e.g. a failed upgrade undone): it never took money.
+        const invoice = event.data.object as Stripe.Invoice;
+        if (invoice.id) await PaymentService.forgetUnpaid(invoice.id);
+        const id = this.invoiceSubscriptionId(invoice);
+        if (id) await this.syncSubscription(id);
+        return;
+      }
       default:
         return;
     }

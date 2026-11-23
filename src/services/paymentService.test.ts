@@ -79,3 +79,12 @@ describe("refund webhook", () => {
     expect(options.replacements).toEqual({ refunded: 349, intent: "pi_1" });
   });
 });
+
+describe("voided invoice", () => {
+  it("drops only a failed row: a voided invoice never took money", async () => {
+    const query = vi.spyOn(sequelize, "query").mockResolvedValue([[], 0] as never);
+    await PaymentService.forgetUnpaid("in_9");
+    expect(query.mock.calls[0][0]).toMatch(/DELETE FROM "payments" WHERE "stripeInvoiceId" = :invoiceId AND status = 'failed'/);
+    expect(query.mock.calls[0][1]).toMatchObject({ replacements: { invoiceId: "in_9" } });
+  });
+});

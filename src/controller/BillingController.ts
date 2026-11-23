@@ -135,7 +135,31 @@ export default class BillingController {
     await respond(res, "Could not resume", () => StripeService.setCancelAtPeriodEnd(req.user.id, req.body || {}, false));
   };
 
-  /** Monthly <-> yearly. Body: { interval, companyId? }. */
+  /** End the free days now and charge the saved card today. Body: { companyId? }. */
+  static payNow = async (req: any, res: Response) => {
+    await respond(res, "Could not take the payment", () => StripeService.payNow(req.user.id, req.body || {}));
+  };
+
+  /** What "Try again" on a failed payment charges, and on which card. Body: { companyId? }. */
+  static previewRetry = async (req: any, res: Response) => {
+    await respond(res, "Could not load the unpaid payment", () =>
+      StripeService.previewRetry(req.user.id, req.body || {})
+    );
+  };
+
+  /** Charge a failed payment again now. Body: { companyId? }. */
+  static retryPayment = async (req: any, res: Response) => {
+    await respond(res, "Could not take the payment", () => StripeService.retryPayment(req.user.id, req.body || {}));
+  };
+
+  /** What a monthly <-> yearly switch charges today. Body: { interval, companyId? }. */
+  static previewInterval = async (req: any, res: Response) => {
+    await respond(res, "Could not work out the price", () =>
+      StripeService.previewInterval(req.user.id, req.body || {})
+    );
+  };
+
+  /** Monthly <-> yearly. Body: { interval, companyId?, prorationDate? }. */
   static changeInterval = async (req: any, res: Response) => {
     await respond(res, "Could not change the billing period", () =>
       StripeService.changeInterval(req.user.id, req.body || {})

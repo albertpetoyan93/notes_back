@@ -609,7 +609,7 @@ export default class AuthController {
         ...user.toJSON(),
         autoLockMinutes: CompanyPolicyService.effectiveAutoLock(user.autoLockMinutes ?? 15, rules),
         extensionAutoLockMinutes: CompanyPolicyService.effectiveAutoLock(
-          user.extensionAutoLockMinutes ?? 60,
+          user.extensionAutoLockMinutes ?? 360,
           rules
         ),
         autoLockLimit: rules.maxIdleMinutes,

@@ -15,6 +15,10 @@ router.post("/checkout", BillingController.checkout as RequestHandler);
 router.post("/portal", BillingController.portal as RequestHandler);
 router.post("/cancel", BillingController.cancel as RequestHandler);
 router.post("/resume", BillingController.resume as RequestHandler);
+router.post("/pay-now", BillingController.payNow as RequestHandler);
+router.post("/retry/preview", BillingController.previewRetry as RequestHandler);
+router.post("/retry", BillingController.retryPayment as RequestHandler);
+router.post("/interval/preview", BillingController.previewInterval as RequestHandler);
 router.post("/interval", BillingController.changeInterval as RequestHandler);
 router.post("/companies/:id/discount", BillingController.requestDiscount as RequestHandler);
 

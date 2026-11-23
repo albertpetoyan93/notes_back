@@ -90,7 +90,9 @@ class PaymentService {
     const owner: Owner | null = await StripeService.ownerOfRemote(remote);
     if (!owner) return "skipped";
 
-    const line = invoice.lines?.data?.[0];
+    // The period paid for: the line reaching furthest. A switch to yearly also carries a
+    // credit line for the unused month, which must not set the period.
+    const line = [...(invoice.lines?.data || [])].sort((a, b) => (b.period?.end || 0) - (a.period?.end || 0))[0];
     const paidAt =
       iso(invoice.status_transitions?.paid_at) || iso(invoice.status_transitions?.finalized_at) || iso(invoice.created)!;
 
@@ -106,6 +108,7 @@ class PaymentService {
          "discountCents" = EXCLUDED."discountCents", "promoCode" = EXCLUDED."promoCode",
          "invoiceNumber" = EXCLUDED."invoiceNumber", "invoicePdf" = EXCLUDED."invoicePdf",
          "hostedInvoiceUrl" = EXCLUDED."hostedInvoiceUrl", "paidAt" = EXCLUDED."paidAt",
+         "periodStart" = EXCLUDED."periodStart", "periodEnd" = EXCLUDED."periodEnd",
          -- A refund recorded earlier keeps its status; a failure later paid becomes paid.
          status = CASE WHEN "payments"."refundedCents" > 0 THEN "payments".status ELSE EXCLUDED.status END,
          "updatedAt" = NOW()`,
@@ -133,6 +136,13 @@ class PaymentService {
       }
     );
     return "recorded";
+  }
+
+  /** A failed payment whose invoice was voided took no money: it leaves the history. */
+  async forgetUnpaid(invoiceId: string) {
+    await sequelize.query(`DELETE FROM "payments" WHERE "stripeInvoiceId" = :invoiceId AND status = 'failed'`, {
+      replacements: { invoiceId },
+    });
   }
 
   /** A refund (full or partial) on a recorded payment. */
