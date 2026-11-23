@@ -11,6 +11,8 @@ import emergency from "./emergency";
 import attachments from "./attachments";
 import files from "./files";
 import pv from "./pv";
+import breaches from "./breaches";
+import sealedSettings from "./sealedSettings";
 
 const router = Router();
 
@@ -26,5 +28,7 @@ router.use("/emergency", emergency);
 router.use("/attachments", attachments);
 router.use("/files", files);
 router.use("/pv", pv);
+router.use("/breaches", breaches);
+router.use("/sealed-settings", sealedSettings);
 
 export default router;
