@@ -317,6 +317,44 @@ class EmailService {
     });
   }
 
+  /** A product announcement to an existing user (AnnouncementService), with a one-click opt-out. */
+  async sendAnnouncement(input: { campaign: "breach-alerts"; to: string; unsubscribeUrl: string }) {
+    const origin = (EnvVars.FrontendOrigin || "http://localhost:5173").split(",")[0].trim().replace(/\/$/, "");
+    const vault = `${origin}/?health=1`;
+    const settings = `${origin}/settings/security`;
+    const leakCheck = "https://2keevo.com/password-leak-check";
+    const subject = "New in 2keevo: free breach alerts";
+    const intro = "2keevo now warns you when a website you have a login on reports a data breach.";
+    const points = [
+      "A banner in your vault and a \"Site breached\" label on that login.",
+      "A note from the browser extension when you open the site.",
+      "One tap makes a strong new password.",
+    ];
+    const how =
+      "It's free on every plan. Your vault compares Have I Been Pwned's public list of breached websites with your logins on your device, so we never learn which sites you use.";
+    const email = "Want an email when big websites are breached? Turn it on in Settings › Security (at most once a week).";
+    const text = [
+      "Hi,", "", intro, "", ...points.map((p) => `- ${p}`), "", how, "", `Open your vault: ${vault}`, "",
+      `${email} ${settings}`, "", `Check any password for leaks, free and private: ${leakCheck}`, "",
+      "The 2keevo team", "", `Don't want product news? ${input.unsubscribeUrl}`,
+    ].join("\n");
+    const html = `<div style="font-family:Segoe UI,sans-serif;color:#1f2937;line-height:1.5;">
+<p style="margin:0 0 12px;">Hi,</p>
+<p style="margin:0 0 12px;">${escapeHtml(intro)}</p>
+<ul style="margin:0 0 16px;padding-left:20px;">${points.map((p) => `<li style="margin:0 0 6px;">${escapeHtml(p)}</li>`).join("")}</ul>
+<p style="margin:0 0 16px;">${escapeHtml(how)}</p>
+<p style="margin:0 0 20px;"><a href="${escapeHtml(vault)}" style="display:inline-block;background:#6d5efc;color:#ffffff;text-decoration:none;padding:10px 16px;border-radius:8px;">Open my vault</a></p>
+<p style="margin:0 0 12px;">${escapeHtml(email)} <a href="${escapeHtml(settings)}">Settings › Security</a></p>
+<p style="margin:0 0 16px;">Check any password for leaks, free and private: <a href="${leakCheck}">2keevo.com/password-leak-check</a></p>
+<p style="margin:0 0 20px;">The 2keevo team</p>
+<p style="margin:0;color:#6b7280;font-size:12px;">You're getting this because you have a 2keevo account. <a href="${escapeHtml(input.unsubscribeUrl)}" style="color:#6b7280;">No more product news</a>.</p>
+</div>`;
+    return this.deliver(input.to, subject, text, html, EnvVars.Mail.From, {
+      "List-Unsubscribe": `<${input.unsubscribeUrl}>`,
+      "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+    });
+  }
+
   /** Support asked to turn off 2FA; nothing changes unless the user confirms. */
   async sendRemoveTwoFactorConfirm(input: { to: string; link: string; expiresAt: Date }) {
     const until = `${input.expiresAt.toLocaleString("en-GB", {

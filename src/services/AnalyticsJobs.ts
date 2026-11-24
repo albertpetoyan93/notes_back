@@ -1,3 +1,4 @@
+import AnnouncementService from "./AnnouncementService";
 import JobService from "./JobService";
 import BreachDigestService from "./BreachDigestService";
 import BreachFeedService from "./BreachFeedService";
@@ -15,4 +16,6 @@ export function registerAnalyticsJobs() {
   JobService.register("security:breach-feed", () => BreachFeedService.job());
   // The opt-in weekly breach email (phase 3); runs daily, sends to whoever is due, capped per day.
   JobService.register("security:breach-digest", () => BreachDigestService.run());
+  // Product announcements to existing users in daily batches; off unless ANNOUNCEMENT names one.
+  JobService.register("marketing:announcement", () => AnnouncementService.run());
 }

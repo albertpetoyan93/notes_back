@@ -13,6 +13,7 @@ import files from "./files";
 import pv from "./pv";
 import breaches from "./breaches";
 import breachDigest from "./breachDigest";
+import productNews from "./productNews";
 import sealedSettings from "./sealedSettings";
 
 const router = Router();
@@ -31,6 +32,7 @@ router.use("/files", files);
 router.use("/pv", pv);
 router.use("/breaches", breaches);
 router.use("/breach-digest", breachDigest);
+router.use("/product-news", productNews);
 router.use("/sealed-settings", sealedSettings);
 
 export default router;
