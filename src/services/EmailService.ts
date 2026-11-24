@@ -42,6 +42,7 @@ class EmailService {
     text: string,
     html: string,
     from: string = EnvVars.Mail.From,
+    headers?: Record<string, string>,
   ) {
     if (!this.isConfigured()) {
       logger.info(
@@ -56,6 +57,7 @@ class EmailService {
         subject,
         text,
         html,
+        ...(headers ? { headers } : {}),
       });
       return true;
     } catch (error) {
@@ -270,6 +272,49 @@ class EmailService {
 <p style="margin:0;"><a href="${escapeHtml(link)}" style="display:inline-block;background:#6d5efc;color:#ffffff;text-decoration:none;padding:10px 16px;border-radius:8px;">Security settings</a></p>
 </div>`;
     return this.deliver(input.to, subject, text, html, this.securityFrom());
+  }
+
+  /**
+   * Breach alerts, phase 3: the weekly list of big new breaches (opt-in). The same for everyone;
+   * the vault shows whether one concerns you. One-click unsubscribe (RFC 8058) in the headers.
+   */
+  async sendBreachDigest(input: {
+    to: string;
+    breaches: { title: string; domain: string; breachDate: string | null; pwnCount: number; dataClasses: string[] }[];
+    unsubscribeUrl: string;
+  }) {
+    const origin = EnvVars.FrontendOrigin || "http://localhost:5173";
+    const vault = `${origin.split(",")[0].trim().replace(/\/$/, "")}/?health=1`;
+    const n = input.breaches.length;
+    const subject = n === 1 ? `Breach alert: ${input.breaches[0].title}` : `Breach alerts: ${n} sites this week`;
+    const line = (b: (typeof input.breaches)[number]) => {
+      const what = b.dataClasses.includes("Passwords") ? "passwords and account details" : "account details";
+      const when = b.breachDate ? ` (${b.breachDate})` : "";
+      return `${b.title}, ${b.domain}${when}: ${b.pwnCount.toLocaleString("en-US")} accounts, ${what}`;
+    };
+    const text = [
+      n === 1 ? "A big website reported a breach this week:" : "Big websites that reported a breach this week:",
+      "",
+      ...input.breaches.map((b) => `- ${line(b)}`),
+      "",
+      "Open 2keevo to see if any of your logins are affected. Your vault checks this on your device, so we don't know which sites you use.",
+      "",
+      vault,
+      "",
+      "Breach data from Have I Been Pwned.",
+      `Stop these emails: ${input.unsubscribeUrl}`,
+    ].join("\n");
+    const html = `<div style="font-family:Segoe UI,sans-serif;color:#1f2937;line-height:1.5;">
+<p style="margin:0 0 12px;">${n === 1 ? "A big website reported a breach this week:" : "Big websites that reported a breach this week:"}</p>
+<ul style="margin:0 0 16px;padding-left:20px;">${input.breaches.map((b) => `<li style="margin:0 0 6px;">${escapeHtml(line(b))}</li>`).join("")}</ul>
+<p style="margin:0 0 16px;">Open 2keevo to see if any of your logins are affected. Your vault checks this on your device, so we don't know which sites you use.</p>
+<p style="margin:0 0 20px;"><a href="${escapeHtml(vault)}" style="display:inline-block;background:#6d5efc;color:#ffffff;text-decoration:none;padding:10px 16px;border-radius:8px;">Check my vault</a></p>
+<p style="margin:0;color:#6b7280;font-size:12px;">Breach data from Have I Been Pwned. <a href="${escapeHtml(input.unsubscribeUrl)}" style="color:#6b7280;">Stop these emails</a>.</p>
+</div>`;
+    return this.deliver(input.to, subject, text, html, this.securityFrom(), {
+      "List-Unsubscribe": `<${input.unsubscribeUrl}>`,
+      "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+    });
   }
 
   /** Support asked to turn off 2FA; nothing changes unless the user confirms. */

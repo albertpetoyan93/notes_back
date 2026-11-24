@@ -1,4 +1,5 @@
 import JobService from "./JobService";
+import BreachDigestService from "./BreachDigestService";
 import BreachFeedService from "./BreachFeedService";
 import TrafficService from "./TrafficService";
 import MetricsDailyService from "./admin/MetricsDailyService";
@@ -12,4 +13,6 @@ export function registerAnalyticsJobs() {
   JobService.register("analytics:traffic-cleanup", () => TrafficService.cleanup());
   // The public list of breached websites for breach alerts (docs/features/breach-alerts.md).
   JobService.register("security:breach-feed", () => BreachFeedService.job());
+  // The opt-in weekly breach email (phase 3); runs daily, sends to whoever is due, capped per day.
+  JobService.register("security:breach-digest", () => BreachDigestService.run());
 }
