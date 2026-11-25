@@ -273,8 +273,17 @@ class StripeService {
       where: { plan: "team", companyId: { [Op.ne]: null }, stripeSubscriptionId: { [Op.ne]: null }, status: { [Op.in]: ["active", "past_due"] } },
       attributes: ["companyId"],
     });
-    for (const row of paid) await this.syncSeats(row.companyId as number);
-    return { checked: paid.length };
+    // One broken subscription (e.g. one Stripe no longer knows) must not stop the others.
+    const failed: number[] = [];
+    for (const row of paid) {
+      try {
+        await this.syncSeats(row.companyId as number);
+      } catch (error: any) {
+        failed.push(row.companyId as number);
+        logger.err(`team seats for company ${row.companyId}: ${error?.message || error}`);
+      }
+    }
+    return { checked: paid.length, failed };
   }
 
   /* Checkout and the customer portal ------------------------------------------------ */

@@ -44,10 +44,10 @@ export class RefreshError extends Error {
 }
 
 /** Allowed auto-lock times in minutes; 0 = never. */
-export const AUTO_LOCK_CHOICES = [0, 5, 15, 30, 60];
+export const AUTO_LOCK_CHOICES = [0, 5, 15, 30, 60, 120, 240, 360, 480, 600, 720, 1440];
 
-/** The browser extension may also stay open for 3 or 6 hours. */
-export const EXTENSION_AUTO_LOCK_CHOICES = [...AUTO_LOCK_CHOICES, 180, 360];
+/** The browser extension has its own list, from 5 minutes up to 12 hours. */
+export const EXTENSION_AUTO_LOCK_CHOICES = [0, 5, 15, 30, 60, 180, 360, 480, 600, 720];
 
 // The vault app sends activity at most once a minute, so allow a little more.
 const ACTIVITY_SLACK_MS = 90 * 1000;
