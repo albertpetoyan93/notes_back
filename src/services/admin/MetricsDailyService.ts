@@ -53,6 +53,7 @@ export async function snapshot(day: string, now = endOfDay(day)): Promise<Metric
         (SELECT COUNT(*) FROM "users" WHERE "createdAt" >= :dayStart AND "createdAt" <= :dayEnd) AS signups,
         (SELECT COUNT(*) FROM "subscriptions"
           WHERE "status" IN ('canceled', 'expired')
+            AND "grantedBy" IS NULL
             AND "updatedAt" >= :dayStart AND "updatedAt" <= :dayEnd) AS churned,
         (SELECT COUNT(*) FROM (
            SELECT "userId", MIN("createdAt") AS first_at FROM "notes"

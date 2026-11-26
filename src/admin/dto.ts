@@ -185,6 +185,8 @@ export interface SubscriptionRow {
   cancelAtPeriodEnd: boolean;
   graceEndsAt: string | null;
   stripeManaged: boolean;
+  /** Complimentary plans: the staff email that gave it. */
+  grantedBy: string | null;
 }
 
 export type SubscriptionInput = {
@@ -199,6 +201,7 @@ export type SubscriptionInput = {
   graceEndsAt?: DateLike;
   /** Only whether it is set is read, never the id. */
   stripeSubscriptionId?: string | null;
+  grantedBy?: string | null;
 };
 
 export function toSubscriptionRow(s: SubscriptionInput): SubscriptionRow {
@@ -213,6 +216,7 @@ export function toSubscriptionRow(s: SubscriptionInput): SubscriptionRow {
     cancelAtPeriodEnd: !!s.cancelAtPeriodEnd,
     graceEndsAt: iso(s.graceEndsAt),
     stripeManaged: !!s.stripeSubscriptionId,
+    grantedBy: s.grantedBy ?? null,
   };
 }
 
@@ -416,6 +420,8 @@ export interface CompanyDetail extends CompanyRow {
     twoFactor: boolean;
   }[];
   groups: { id: number; name: string; members: number }[];
+  /** Every Team subscription, latest first (a paid one and free access can both be there). */
+  subscriptions: SubscriptionRow[];
   policies: {
     require2fa: boolean;
     minPasswordLength: number | null;
@@ -443,6 +449,7 @@ export function toCompanyDetail(parts: {
     twoFactorEnabled?: boolean | null;
   }[];
   groups: { id: number; name: string; members: number }[];
+  subscriptions?: SubscriptionInput[];
 }): CompanyDetail {
   const { company } = parts;
   const policies = company.policies || {};
@@ -457,6 +464,7 @@ export function toCompanyDetail(parts: {
       twoFactor: !!m.twoFactorEnabled,
     })),
     groups: parts.groups.map((g) => ({ id: g.id, name: g.name, members: g.members })),
+    subscriptions: (parts.subscriptions ?? (parts.subscription ? [parts.subscription] : [])).map(toSubscriptionRow),
     policies: {
       require2fa: !!policies.require2fa,
       minPasswordLength: policies.minPasswordLength ?? null,

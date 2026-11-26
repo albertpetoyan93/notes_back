@@ -1,10 +1,17 @@
 import type { Request } from "express";
 import type Stripe from "stripe";
 import sequelize from "../../configs/DB/sequelize";
+import { Op } from "sequelize";
+import { PLANS } from "../../common/plans";
 import Company from "../../models/Company";
 import DiscountRequest from "../../models/DiscountRequest";
+import FamilyMember from "../../models/FamilyMember";
 import Subscription from "../../models/Subscription";
+import User from "../../models/User";
+import CompanyBilling, { recipient } from "../CompanyBilling";
 import DiscountService from "../DiscountService";
+import EmailService from "../EmailService";
+import { isLive } from "../EntitlementService";
 import StripeService, { Interval } from "../StripeService";
 import AdminActionService, { AdminActionName, cleanReason } from "./AdminActionService";
 import { actor, Staff } from "./SupportActionService";
@@ -22,6 +29,21 @@ export interface PaymentRow {
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** Free access always ends: at most 2 years ahead (no "forever"; also as far as Stripe can delay a first charge). */
+export const COMPLIMENTARY_MAX_DAYS = 730;
+
+export type ComplimentaryOwner = { userId: number } | { companyId: number };
+
+/** "2026-12-31" -> the end of that day (UTC). Must be tomorrow or later, and within the limit. */
+export function parseComplimentaryEnd(value: unknown, now = new Date()): Date {
+  const text = typeof value === "string" ? value.trim() : "";
+  const end = /^\d{4}-\d{2}-\d{2}$/.test(text) ? new Date(`${text}T23:59:59.999Z`) : null;
+  if (!end || Number.isNaN(end.getTime())) throw fail(400, "Choose the day it ends.");
+  if (end.getTime() - now.getTime() < DAY_MS / 2) throw fail(400, "The end must be tomorrow or later.");
+  if (end.getTime() - now.getTime() > COMPLIMENTARY_MAX_DAYS * DAY_MS) throw fail(400, "Free access can last 2 years at most.");
+  return end;
+}
 
 const fail = (status: number, message: string) => Object.assign(new Error(message), { status });
 
@@ -242,6 +264,148 @@ class AdminBillingService {
       trialEndsAt: new Date(trialEnd * 1000).toISOString(),
       stripe: true,
     });
+  }
+
+  /**
+   * Free Premium or Family for a person, or free Team for a company, until a set day.
+   * The owner is emailed. With `cancelPaid`, a plan they pay for through Stripe is set
+   * to cancel at the end of its period, so they aren't charged while it's free.
+   */
+  static async giveComplimentary(
+    staff: Staff,
+    owner: ComplimentaryOwner,
+    input: { plan: unknown; until: unknown; cancelPaid?: unknown },
+    reason: unknown,
+    req: Request
+  ) {
+    const why = cleanReason(reason);
+    const end = parseComplimentaryEnd(input.until);
+    const plan = input.plan as PaidPlan;
+    const where = "userId" in owner ? { userId: owner.userId } : { companyId: owner.companyId };
+
+    if ("userId" in owner) {
+      if (plan !== "premium" && plan !== "family") throw fail(400, "Choose Premium or Family.");
+      if (!(await User.findByPk(owner.userId, { attributes: ["id"] }))) throw fail(404, "User not found.");
+      if (plan === "family" && (await FamilyMember.count({ where: { userId: owner.userId, status: "active" } }))) {
+        throw fail(409, "They are in someone's family. They must leave it before they can have their own Family.");
+      }
+    } else {
+      if (plan !== "team") throw fail(400, "A company can only have Team.");
+      if (!(await Company.findByPk(owner.companyId, { attributes: ["id"] }))) throw fail(404, "Company not found.");
+    }
+
+    const existing = await Subscription.findAll({ where: { ...where, status: "complimentary" } });
+    if (existing.some((row) => isLive(row))) throw fail(409, "They already have free access. Change its end date instead.");
+
+    // Paid through Stripe and still renewing: cancelled at period end only when staff asked.
+    const paid = await Subscription.findAll({
+      where: { ...where, stripeSubscriptionId: { [Op.ne]: null }, cancelAtPeriodEnd: false },
+    });
+    const renewing = paid.filter((row) => isLive(row) && row.status !== "canceled");
+    const cancelPaid = input.cancelPaid === true;
+    if (cancelPaid) {
+      for (const row of renewing) {
+        const stripeId = row.stripeSubscriptionId as string;
+        await StripeService.client().subscriptions.update(stripeId, { cancel_at_period_end: true });
+        await this.syncAndRecord(stripeId, staff, "subscription_cancelled", row, why, req, { becauseComplimentary: true });
+      }
+    }
+
+    const subscription = await sequelize.transaction(async (transaction) => {
+      const created = await Subscription.create(
+        { ...where, plan, status: "complimentary", currentPeriodEnd: end, grantedBy: staff.email },
+        { transaction }
+      );
+      await AdminActionService.record({
+        staff: actor(staff),
+        action: "complimentary_given",
+        ...targets(created),
+        reason: why,
+        details: {
+          subscriptionId: created.id,
+          plan,
+          until: end.toISOString(),
+          paidPlanCancelled: cancelPaid && renewing.length > 0,
+          paidPlanKept: !cancelPaid && renewing.length > 0,
+        },
+        req,
+        transaction,
+      });
+      return created;
+    });
+
+    // A suspended company opens again right away.
+    if ("companyId" in owner) await CompanyBilling.reopen(owner.companyId);
+
+    const to = await recipient(where);
+    if (to) {
+      await EmailService.sendComplimentaryGiven({
+        to: to.email,
+        planName: PLANS[plan].name,
+        endsAt: end,
+        companyName: to.companyName,
+      }).catch(() => undefined);
+    }
+    return subscription;
+  }
+
+  /** A new end day for free access that is still on. The ending reminder goes out again before it. */
+  static async changeComplimentaryEnd(staff: Staff, subscriptionId: number, until: unknown, reason: unknown, req: Request) {
+    const why = cleanReason(reason);
+    const end = parseComplimentaryEnd(until);
+    const subscription = await loadSubscription(subscriptionId);
+    if (subscription.status !== "complimentary" || !isLive(subscription)) throw fail(409, "This isn't free access that's still on.");
+    const previous = subscription.currentPeriodEnd as Date;
+
+    await sequelize.transaction(async (transaction) => {
+      const [changed] = await Subscription.update(
+        { currentPeriodEnd: end, trialReminderSentAt: null },
+        { where: { id: subscription.id, status: "complimentary", currentPeriodEnd: previous }, transaction }
+      );
+      if (!changed) throw fail(409, "It changed meanwhile. Reload and try again.");
+      await AdminActionService.record({
+        staff: actor(staff),
+        action: "complimentary_changed",
+        ...targets(subscription),
+        reason: why,
+        details: { subscriptionId: subscription.id, from: new Date(previous).toISOString(), until: end.toISOString() },
+        req,
+        transaction,
+      });
+    });
+  }
+
+  /** Free access stops now. A person is told and moves to Free; a company is suspended by the daily job unless it pays. */
+  static async endComplimentary(staff: Staff, subscriptionId: number, reason: unknown, req: Request) {
+    const why = cleanReason(reason);
+    const subscription = await loadSubscription(subscriptionId);
+    if (subscription.status !== "complimentary" || !isLive(subscription)) throw fail(409, "This isn't free access that's still on.");
+
+    await sequelize.transaction(async (transaction) => {
+      const [changed] = await Subscription.update(
+        { status: "expired", currentPeriodEnd: new Date() },
+        { where: { id: subscription.id, status: "complimentary" }, transaction }
+      );
+      if (!changed) throw fail(409, "It changed meanwhile. Reload and try again.");
+      await AdminActionService.record({
+        staff: actor(staff),
+        action: "complimentary_ended",
+        ...targets(subscription),
+        reason: why,
+        details: { subscriptionId: subscription.id, plan: subscription.plan },
+        req,
+        transaction,
+      });
+    });
+
+    if (subscription.userId) {
+      const to = await recipient(subscription);
+      if (to) {
+        await EmailService.sendComplimentaryEnded({ to: to.email, planName: PLANS[subscription.plan].name }).catch(
+          () => undefined
+        );
+      }
+    }
   }
 
   static async decideDiscount(staff: Staff, requestId: number, approve: boolean, reason: unknown, req: Request) {

@@ -114,10 +114,13 @@ class BillingService {
           ],
         });
         if (!company) return null;
-        const team = await Subscription.findOne({
-          where: { companyId: company.id, plan: "team" },
-          order: [["updatedAt", "DESC"]],
-        });
+        // The Team that counts now (paid over free access), else the latest one.
+        const team =
+          (await EntitlementService.forCompany(company.id)) ||
+          (await Subscription.findOne({
+            where: { companyId: company.id, plan: "team" },
+            order: [["updatedAt", "DESC"]],
+          }));
         const trialUsed = await TrialUsed.count({
           where: { companyId: company.id, plan: "team" },
         });

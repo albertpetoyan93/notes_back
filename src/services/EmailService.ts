@@ -10,6 +10,8 @@ function escapeHtml(value: string) {
     .replace(/"/g, "&quot;");
 }
 
+const longDay = (date: Date) => date.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+
 class EmailService {
   isConfigured() {
     return Boolean(EnvVars.Mail.Host && EnvVars.Mail.From);
@@ -438,6 +440,55 @@ class EmailService {
 <p style="margin:0;"><a href="${escapeHtml(link)}" style="display:inline-block;background:#6d5efc;color:#ffffff;text-decoration:none;padding:10px 16px;border-radius:8px;">See plans</a></p>
 </div>`;
     return this.deliver(input.to, subject, text, html);
+  }
+
+  /** Staff gave free access from the admin app (Premium or Family for a person, Team for a company). */
+  async sendComplimentaryGiven(input: { to: string; planName: string; endsAt: Date; companyName?: string | null }) {
+    const day = longDay(input.endsAt);
+    const what = input.companyName ? `${input.companyName} has ${input.planName}` : `You have ${input.planName}`;
+    return this.notice(
+      input.to,
+      `${what} free until ${day}`,
+      [
+        `Good news: the 2keevo team gave ${input.companyName ? `${input.companyName}` : "you"} ${input.planName} for free until ${day}.`,
+        "There's nothing to pay and no card is needed. Every paid feature is on now.",
+        input.companyName
+          ? "We'll remind you a week before it ends. To keep the company open after that, subscribe to Team."
+          : "We'll remind you a week before it ends. After that the account moves to the Free plan, and nothing is deleted.",
+      ],
+      { label: "See your plan", path: "/settings/billing" }
+    );
+  }
+
+  /** Free access from staff ends within a week. */
+  async sendComplimentaryEnding(input: { to: string; planName: string; endsAt: Date; companyName?: string | null }) {
+    const day = longDay(input.endsAt);
+    const what = input.companyName ? `${input.companyName}'s free ${input.planName}` : `Your free ${input.planName}`;
+    return this.notice(
+      input.to,
+      `${what} ends on ${day}`,
+      [
+        `${what} on 2keevo ends on ${day}.`,
+        input.companyName
+          ? "Subscribe to Team to keep the company open. If no one does, it's suspended: items are hidden but kept."
+          : "Subscribe to keep it. If you don't, the account moves to the Free plan and every item stays where it is.",
+        "Subscribe now and the first payment waits until the free period ends.",
+      ],
+      { label: `Keep ${input.planName}`, path: "/settings/billing" }
+    );
+  }
+
+  /** Free access from staff ended (a person moves to Free; a company's suspension email comes from its own job). */
+  async sendComplimentaryEnded(input: { to: string; planName: string }) {
+    return this.notice(
+      input.to,
+      `Your free ${input.planName} has ended`,
+      [
+        `Your free ${input.planName} on 2keevo has ended, and the account is on the Free plan now.`,
+        "Nothing was deleted. Collections and shares over the Free limits keep working; you just can't add new ones.",
+      ],
+      { label: "See plans", path: "/settings/billing" }
+    );
   }
 
   /** A short billing notice: paragraphs and one button. */

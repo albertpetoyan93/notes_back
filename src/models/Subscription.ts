@@ -2,7 +2,11 @@ import { DataTypes, Model, Optional } from "sequelize";
 import sequelize from "../configs/DB/sequelize";
 import type { PlanId } from "../common/plans";
 
-export type SubscriptionStatus = "trialing" | "active" | "past_due" | "canceled" | "expired";
+/**
+ * "complimentary": free access given by 2keevo staff (admin app). No Stripe ids; it
+ * unlocks its plan until currentPeriodEnd, then the daily job marks it "expired".
+ */
+export type SubscriptionStatus = "trialing" | "active" | "past_due" | "canceled" | "expired" | "complimentary";
 
 interface SubscriptionAttributes {
   id: number;
@@ -27,6 +31,8 @@ interface SubscriptionAttributes {
   currency?: string | null;
   stripeCustomerId?: string | null;
   stripeSubscriptionId?: string | null;
+  /** Complimentary plans: the staff email that gave it. */
+  grantedBy?: string | null;
   createdAt?: Date;
   updatedAt?: Date;
 }
@@ -48,6 +54,7 @@ type SubscriptionCreation = Optional<
   | "currency"
   | "stripeCustomerId"
   | "stripeSubscriptionId"
+  | "grantedBy"
   | "createdAt"
   | "updatedAt"
 >;
@@ -73,6 +80,7 @@ class Subscription
   public currency?: string | null;
   public stripeCustomerId?: string | null;
   public stripeSubscriptionId?: string | null;
+  public grantedBy?: string | null;
   public readonly createdAt!: Date;
   public readonly updatedAt!: Date;
 }
@@ -96,6 +104,7 @@ Subscription.init(
     currency: { type: DataTypes.STRING(3), allowNull: true },
     stripeCustomerId: { type: DataTypes.STRING(255), allowNull: true },
     stripeSubscriptionId: { type: DataTypes.STRING(255), allowNull: true, unique: true },
+    grantedBy: { type: DataTypes.STRING(255), allowNull: true },
   },
   { sequelize, tableName: "subscriptions", timestamps: true }
 );

@@ -38,6 +38,7 @@ const SUBSCRIPTION_ATTRIBUTES: (string | [ReturnType<typeof literal>, string])[]
   "currentPeriodEnd",
   "cancelAtPeriodEnd",
   "graceEndsAt",
+  "grantedBy",
   [literal(`("stripeSubscriptionId" IS NOT NULL)`), "stripeManaged"],
 ];
 
@@ -141,7 +142,7 @@ class AdminCompaniesService {
       | null;
     if (!company) return null;
 
-    const [memberRows, seats, subscriptions, groups] = await Promise.all([
+    const [memberRows, seats, subscriptions, allSubscriptions, groups] = await Promise.all([
       // Invited and active people (not removed). From User only the id, email and 2FA flag.
       CompanyMember.findAll({
         where: { companyId, status: { [Op.ne]: "removed" } },
@@ -154,6 +155,16 @@ class AdminCompaniesService {
       }),
       seatsFor([companyId]),
       subscriptionsFor([companyId]),
+      Subscription.findAll({
+        where: { companyId, plan: "team" },
+        attributes: SUBSCRIPTION_ATTRIBUTES,
+        order: [
+          ["updatedAt", "DESC"],
+          ["id", "DESC"],
+        ],
+        limit: 10,
+        raw: true,
+      }),
       // Names and counts only; active members, like GroupService.memberCounts.
       sequelize.query<{ id: number; name: string; members: string | number }>(
         `SELECT g."id", g."name", COUNT(c."id") AS members
@@ -187,6 +198,7 @@ class AdminCompaniesService {
       subscription: subscriptions.get(companyId) ?? null,
       members,
       groups: groups.map((group) => ({ id: group.id, name: group.name, members: Number(group.members) })),
+      subscriptions: allSubscriptions.map(subscriptionInput),
     });
   }
 }

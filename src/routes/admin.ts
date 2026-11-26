@@ -148,6 +148,30 @@ export const ADMIN_ROUTES: {
   },
   {
     method: "post",
+    path: "/users/:id/complimentary",
+    permission: "billing.manage",
+    handler: AdminController.giveUserComplimentary as RequestHandler,
+  },
+  {
+    method: "post",
+    path: "/companies/:id/complimentary",
+    permission: "billing.manage",
+    handler: AdminController.giveCompanyComplimentary as RequestHandler,
+  },
+  {
+    method: "post",
+    path: "/subscriptions/:id/complimentary/end-date",
+    permission: "billing.manage",
+    handler: AdminController.changeComplimentaryEnd as RequestHandler,
+  },
+  {
+    method: "post",
+    path: "/subscriptions/:id/complimentary/end",
+    permission: "billing.manage",
+    handler: AdminController.endComplimentary as RequestHandler,
+  },
+  {
+    method: "post",
     path: "/discounts/:id/approve",
     permission: "billing.manage",
     handler: AdminController.approveDiscount as RequestHandler,

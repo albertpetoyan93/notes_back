@@ -68,7 +68,7 @@ function parseDay(value: string, edge: "start" | "end"): Date {
 const LIVE = `(s."status" = 'active'
   OR (s."status" = 'trialing' AND s."trialEndsAt" > NOW())
   OR (s."status" = 'past_due' AND (s."graceEndsAt" IS NULL OR s."graceEndsAt" > NOW()))
-  OR (s."status" = 'canceled' AND s."currentPeriodEnd" > NOW()))`;
+  OR (s."status" IN ('canceled', 'complimentary') AND s."currentPeriodEnd" > NOW()))`;
 
 // Ids of everyone a live subscription covers: their own, the Family they joined, a Team
 // they are an active member of. `plan` is checked against PLANS before it gets here.
@@ -91,6 +91,16 @@ const coveredBy = (plan: PlanId | null) => {
 };
 
 function planFilter(plan: string) {
+  // Free access given by staff (their own, still on).
+  if (plan === "complimentary") {
+    return {
+      id: {
+        [Op.in]: literal(
+          `(SELECT s."userId" FROM "subscriptions" s WHERE s."userId" IS NOT NULL AND s."status" = 'complimentary' AND s."currentPeriodEnd" > NOW())`
+        ),
+      },
+    };
+  }
   if (!Object.prototype.hasOwnProperty.call(PLANS, plan)) throw fail(400, "Unknown plan.");
   if (plan === "free") return { id: { [Op.notIn]: literal(`(${coveredBy(null)})`) } };
   return { id: { [Op.in]: literal(`(${coveredBy(plan as PlanId)})`) } };
@@ -207,6 +217,7 @@ const SUBSCRIPTION_ATTRIBUTES: (string | [ReturnType<typeof literal>, string])[]
   "currentPeriodEnd",
   "cancelAtPeriodEnd",
   "graceEndsAt",
+  "grantedBy",
   [literal(`("stripeSubscriptionId" IS NOT NULL)`), "stripeManaged"],
 ];
 

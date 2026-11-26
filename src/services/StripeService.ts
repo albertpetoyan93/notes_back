@@ -310,15 +310,21 @@ class StripeService {
     const metadata: Record<string, string> =
       "userId" in owner ? { userId: String(owner.userId), plan } : { companyId: String(owner.companyId), plan };
 
-    // Subscribing during a 2keevo trial: the first charge waits until the trial ends.
+    // Subscribing during a 2keevo trial, or free access from staff for this plan: the
+    // first charge waits until it ends.
     const trial = await Subscription.findOne({
       where: { ...ownerWhere(owner), status: "trialing", stripeSubscriptionId: null },
       order: [["trialEndsAt", "DESC"]],
     });
-    const trialEnd =
-      trial?.trialEndsAt && new Date(trial.trialEndsAt).getTime() - Date.now() > MIN_DEFERRED_MS
-        ? Math.floor(new Date(trial.trialEndsAt).getTime() / 1000)
-        : undefined;
+    const free = await Subscription.findOne({
+      where: { ...ownerWhere(owner), plan, status: "complimentary", currentPeriodEnd: { [Op.gt]: new Date() } },
+      order: [["currentPeriodEnd", "DESC"]],
+    });
+    const freeUntil = Math.max(
+      trial?.trialEndsAt ? new Date(trial.trialEndsAt).getTime() : 0,
+      free?.currentPeriodEnd ? new Date(free.currentPeriodEnd).getTime() : 0
+    );
+    const trialEnd = freeUntil - Date.now() > MIN_DEFERRED_MS ? Math.floor(freeUntil / 1000) : undefined;
 
     // An approved nonprofit or school discount; otherwise a promotion code may be typed in.
     // Stripe takes one or the other: one discount at a time.

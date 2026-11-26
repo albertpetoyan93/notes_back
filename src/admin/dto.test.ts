@@ -159,7 +159,7 @@ describe("admin dto allow-lists", () => {
   it("toSubscriptionRow", () => {
     const out = toSubscriptionRow(subscription);
     expect(Object.keys(out).sort()).toEqual([
-      "cancelAtPeriodEnd", "currentPeriodEnd", "graceEndsAt", "id", "interval", "plan", "seats",
+      "cancelAtPeriodEnd", "currentPeriodEnd", "graceEndsAt", "grantedBy", "id", "interval", "plan", "seats",
       "status", "stripeManaged", "trialEndsAt",
     ]);
     expect(out.stripeManaged).toBe(true);
@@ -267,7 +267,7 @@ describe("admin dto allow-lists", () => {
     });
     expect(Object.keys(out).sort()).toEqual([
       "createdAt", "discount", "groups", "id", "markedForRemovalAt", "members", "name", "owner",
-      "policies", "recovery", "seatsUsed", "status", "subscription", "suspendedAt",
+      "policies", "recovery", "seatsUsed", "status", "subscription", "subscriptions", "suspendedAt",
     ]);
     expect(Object.keys(out.members[0]).sort()).toEqual(["email", "joinedAt", "role", "status", "twoFactor", "userId"]);
     expect(Object.keys(out.groups[0]).sort()).toEqual(["id", "members", "name"]);

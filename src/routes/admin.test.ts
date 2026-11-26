@@ -57,6 +57,9 @@ vi.mock("@src/services/admin/AdminBillingService", () => ({
     refund: vi.fn(),
     changePlan: vi.fn(),
     extendTrial: vi.fn(),
+    giveComplimentary: vi.fn(),
+    changeComplimentaryEnd: vi.fn(),
+    endComplimentary: vi.fn(),
     decideDiscount: vi.fn(),
     removeDiscount: vi.fn(),
   },
@@ -119,6 +122,10 @@ const TABLE = [
   "post /subscriptions/:id/refund billing.manage",
   "post /subscriptions/:id/plan billing.manage",
   "post /subscriptions/:id/extend-trial billing.manage",
+  "post /users/:id/complimentary billing.manage",
+  "post /companies/:id/complimentary billing.manage",
+  "post /subscriptions/:id/complimentary/end-date billing.manage",
+  "post /subscriptions/:id/complimentary/end billing.manage",
   "post /discounts/:id/approve billing.manage",
   "post /discounts/:id/decline billing.manage",
   "delete /companies/:id/discount billing.manage",
@@ -442,6 +449,29 @@ describe("bodies", () => {
   it("refund passes the payment intent and optional amount", async () => {
     await as("admin", "post", "/subscriptions/8/refund", { reason: "r", paymentIntentId: "pi_1" });
     expect(m.billing.refund).toHaveBeenCalledWith(expect.anything(), 8, "pi_1", undefined, "r", expect.anything());
+  });
+
+  it("free access routes pass the owner, end day and reason", async () => {
+    await as("admin", "post", "/users/5/complimentary", { reason: "r", plan: "premium", until: "2027-01-31" });
+    expect(m.billing.giveComplimentary).toHaveBeenCalledWith(
+      expect.anything(),
+      { userId: 5 },
+      expect.objectContaining({ plan: "premium", until: "2027-01-31" }),
+      "r",
+      expect.anything()
+    );
+    await as("admin", "post", "/companies/3/complimentary", { reason: "r", plan: "team", until: "2027-01-31" });
+    expect(m.billing.giveComplimentary).toHaveBeenLastCalledWith(
+      expect.anything(),
+      { companyId: 3 },
+      expect.objectContaining({ plan: "team" }),
+      "r",
+      expect.anything()
+    );
+    await as("admin", "post", "/subscriptions/8/complimentary/end-date", { reason: "r", until: "2027-02-28" });
+    expect(m.billing.changeComplimentaryEnd).toHaveBeenCalledWith(expect.anything(), 8, "2027-02-28", "r", expect.anything());
+    await as("admin", "post", "/subscriptions/8/complimentary/end", { reason: "r" });
+    expect(m.billing.endComplimentary).toHaveBeenCalledWith(expect.anything(), 8, "r", expect.anything());
   });
 
   it("extend-trial passes the days", async () => {

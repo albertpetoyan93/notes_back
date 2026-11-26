@@ -24,7 +24,7 @@ import type { StaffRequest } from "@src/types";
 
 const INT4_MAX = 2147483647;
 const STAFF_ROLES: StaffRole[] = ["admin", "support", "marketing"];
-const PLANS = new Set(["free", "premium", "family", "team"]);
+const PLANS = new Set(["free", "premium", "family", "team", "complimentary"]);
 
 const fail = (status: number, message: string) => Object.assign(new Error(message), { status });
 
@@ -467,6 +467,34 @@ export default class AdminController {
   static extendTrial = async (req: StaffRequest, res: Response, next: NextFunction) => {
     await run(res, next, async () => {
       await AdminBillingService.extendTrial(req.staff!, parseId(req.params.id), req.body?.days, req.body?.reason, req);
+      return {};
+    });
+  };
+
+  static giveUserComplimentary = async (req: StaffRequest, res: Response, next: NextFunction) => {
+    await run(res, next, async () => {
+      await AdminBillingService.giveComplimentary(req.staff!, { userId: parseId(req.params.id) }, req.body || {}, req.body?.reason, req);
+      return {};
+    });
+  };
+
+  static giveCompanyComplimentary = async (req: StaffRequest, res: Response, next: NextFunction) => {
+    await run(res, next, async () => {
+      await AdminBillingService.giveComplimentary(req.staff!, { companyId: parseId(req.params.id) }, req.body || {}, req.body?.reason, req);
+      return {};
+    });
+  };
+
+  static changeComplimentaryEnd = async (req: StaffRequest, res: Response, next: NextFunction) => {
+    await run(res, next, async () => {
+      await AdminBillingService.changeComplimentaryEnd(req.staff!, parseId(req.params.id), req.body?.until, req.body?.reason, req);
+      return {};
+    });
+  };
+
+  static endComplimentary = async (req: StaffRequest, res: Response, next: NextFunction) => {
+    await run(res, next, async () => {
+      await AdminBillingService.endComplimentary(req.staff!, parseId(req.params.id), req.body?.reason, req);
       return {};
     });
   };

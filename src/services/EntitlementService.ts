@@ -47,6 +47,7 @@ export const planLimitBody = (error: PlanLimitError) => ({
  * - active: yes
  * - payment failed: during the grace period
  * - cancelled: until the end of the period already paid for
+ * - complimentary (given by staff): until its end date
  * Keep in step with the SQL copy (`LIVE`) in services/admin/AdminUsersService.ts.
  */
 export function isLive(subscription: Subscription, now = new Date()) {
@@ -59,6 +60,7 @@ export function isLive(subscription: Subscription, now = new Date()) {
     case "past_due":
       return !subscription.graceEndsAt || after(subscription.graceEndsAt);
     case "canceled":
+    case "complimentary":
       return after(subscription.currentPeriodEnd);
     default:
       return false;
@@ -68,7 +70,12 @@ export function isLive(subscription: Subscription, now = new Date()) {
 export const best = (subscriptions: Subscription[], now: Date) =>
   subscriptions
     .filter((subscription) => isLive(subscription, now))
-    .sort((a, b) => PLANS[b.plan].rank - PLANS[a.plan].rank)[0] || null;
+    // Same plan both ways: the one they pay for wins, so Billing shows its renewal.
+    .sort(
+      (a, b) =>
+        PLANS[b.plan].rank - PLANS[a.plan].rank ||
+        Number(a.status === "complimentary") - Number(b.status === "complimentary")
+    )[0] || null;
 
 /** Which source wins for a person, given the best live subscription from each. Also used by the admin users list. */
 export function decidePlan(
